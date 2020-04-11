@@ -55,10 +55,10 @@ public:
 
     void processQueryFromClient(const Angel::TcpConnectionPtr& conn, Angel::Buffer& buf);
     void processRpcFromServer(const Angel::TcpConnectionPtr& conn, Angel::Buffer& buf);
-    void processRpcCommon(const rpc& r);
-    void processRpcAsLeader(const Angel::TcpConnectionPtr& conn, const rpc& r);
-    void processRpcAsCandidate(const Angel::TcpConnectionPtr& conn, const rpc& r);
-    void processRpcAsFollower(const Angel::TcpConnectionPtr& conn, const rpc& r);
+    void processRpcCommon(rpc& r);
+    void processRpcAsLeader(const Angel::TcpConnectionPtr& conn, rpc& r);
+    void processRpcAsCandidate(const Angel::TcpConnectionPtr& conn, rpc& r);
+    void processRpcAsFollower(const Angel::TcpConnectionPtr& conn, rpc& r);
 
     void setHeartBeatTimer();
     void sendHeartBeatToServers();

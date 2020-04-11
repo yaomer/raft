@@ -3,6 +3,8 @@
 
 #include "log_entry.h"
 
+#include <variant>
+
 namespace raft {
 
 enum rpctype {
@@ -47,20 +49,18 @@ struct Reply {
 };
 
 struct rpc {
-    rpc() = default;
+    using rpcmsg = std::variant<AppendEntry, RequestVote, Reply>;
+    rpc() : type(none) {  }
+    AppendEntry& ae() { return std::get<AppendEntry>(msg); }
+    RequestVote& rv() { return std::get<RequestVote>(msg); }
+    Reply& reply() { return std::get<Reply>(msg); }
     int type;
-    union rpcmsg {
-        rpcmsg() {  }
-        ~rpcmsg() {  }
-        AppendEntry ae;
-        RequestVote rv;
-        Reply reply;
-    } msg;
+    rpcmsg msg;
 };
 
 void parserpc(rpc& r, const char *s, const char *es);
-size_t getterm(const rpc& r);
-void printrpc(const rpc& r);
+size_t getterm(rpc& r);
+void printrpc(rpc& r);
 
 }
 

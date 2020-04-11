@@ -12,7 +12,7 @@ using namespace raft;
 // [rv_reply] [rv_reply,term,success\r\n]
 // ==================================================================================================
 
-static int getRpcType(const std::string& type)
+static int getrpctype(const std::string& type)
 {
     static std::unordered_map<std::string, int> typeMap = {
         { "ae_rpc", ae_rpc },
@@ -46,47 +46,54 @@ void raft::parserpc(rpc& r, const char *s, const char *es)
 {
     const char *p = std::find(s, es, ',');
     std::string type(s, p);
-    r.type = getRpcType(type);
+    r.type = getrpctype(type);
     if (r.type == none) return;
     p += 1; // skip ','
     auto indexs = split(p, es, ',');
     std::string ts;
     switch (r.type) {
     case ae_rpc: case hb_rpc: {
+        AppendEntry ae;
         ts.assign(p, p+indexs[0]);
-        r.msg.ae.leaderTerm = atoll(ts.c_str());
-        r.msg.ae.leaderId.assign(p+indexs[0]+1, p+indexs[1]);
+        ae.leaderTerm = atoll(ts.c_str());
+        ae.leaderId.assign(p+indexs[0]+1, p+indexs[1]);
         ts.assign(p+indexs[1]+1, p+indexs[2]);
-        r.msg.ae.prevLogIndex = atoll(ts.c_str());
+        ae.prevLogIndex = atoll(ts.c_str());
         ts.assign(p+indexs[2]+1, p+indexs[3]);
-        r.msg.ae.prevLogTerm = atoll(ts.c_str());
+        ae.prevLogTerm = atoll(ts.c_str());
         if (r.type == hb_rpc) {
             ts.assign(p+indexs[3]+1, es);
-            r.msg.ae.leaderCommit = atoll(ts.c_str());
+            ae.leaderCommit = atoll(ts.c_str());
+            r.msg = ae;
             break;
         }
         ts.assign(p+indexs[3]+1, p+indexs[4]);
-        r.msg.ae.leaderCommit = atoll(ts.c_str());
+        ae.leaderCommit = atoll(ts.c_str());
         ts.assign(p+indexs[4]+1, p+indexs[5]);
-        r.msg.ae.LogEntry.term = atoll(ts.c_str());
-        r.msg.ae.LogEntry.cmd.assign(p+indexs[5]+1, es);
+        ae.LogEntry.term = atoll(ts.c_str());
+        ae.LogEntry.cmd.assign(p+indexs[5]+1, es);
+        r.msg = ae;
         break;
     }
     case rv_rpc: {
+        RequestVote rv;
         ts.assign(p, p+indexs[0]);
-        r.msg.rv.candidateTerm = atoll(ts.c_str());
-        r.msg.rv.candidateId.assign(p+indexs[0]+1,p+indexs[1]);
+        rv.candidateTerm = atoll(ts.c_str());
+        rv.candidateId.assign(p+indexs[0]+1,p+indexs[1]);
         ts.assign(p+indexs[1]+1, p+indexs[2]);
-        r.msg.rv.lastLogIndex = atoll(ts.c_str());
+        rv.lastLogIndex = atoll(ts.c_str());
         ts.assign(p+indexs[2]+1, es);
-        r.msg.rv.lastLogTerm = atoll(ts.c_str());
+        rv.lastLogTerm = atoll(ts.c_str());
+        r.msg = rv;
         break;
     }
     case ae_reply: case rv_reply: {
+        Reply reply;
         ts.assign(p, p+indexs[0]);
-        r.msg.reply.term = atoll(ts.c_str());
+        reply.term = atoll(ts.c_str());
         ts.assign(p+indexs[0]+1, es);
-        r.msg.reply.success = atoi(ts.c_str());
+        reply.success = atoi(ts.c_str());
+        r.msg = reply;
         break;
     }
     case none:
@@ -94,46 +101,49 @@ void raft::parserpc(rpc& r, const char *s, const char *es)
     }
 }
 
-size_t raft::getterm(const rpc& r)
+size_t raft::getterm(rpc& r)
 {
     switch (r.type) {
-    case ae_rpc: case hb_rpc: return r.msg.ae.leaderTerm;
-    case ae_reply: case rv_reply: return r.msg.reply.term;
-    case rv_rpc: return r.msg.rv.candidateTerm;
+    case ae_rpc: case hb_rpc:
+        return r.ae().leaderTerm;
+    case rv_rpc:
+        return r.rv().candidateTerm;
+    case ae_reply: case rv_reply:
+        return r.reply().term;
     }
     return 0;
 }
 
 // format print rpc for debug
-void raft::printrpc(const rpc& r)
+void raft::printrpc(rpc& r)
 {
     switch (r.type) {
     case rv_rpc:
         printf("{'type':'rv_rpc', 'candidateTerm':'%zu', 'candidateId':'%s', "
                 "'lastLogIndex':'%zu', 'lastLogTerm':'%zu'}\n",
-                r.msg.rv.candidateTerm, r.msg.rv.candidateId.c_str(),
-                r.msg.rv.lastLogIndex, r.msg.rv.candidateTerm);
+                r.rv().candidateTerm, r.rv().candidateId.c_str(),
+                r.rv().lastLogIndex, r.rv().candidateTerm);
         break;
     case ae_rpc:
         printf("{'type':'ae_rpc', 'leaderTerm':'%zu', 'leaderId':'%s', "
                 "'prevLogIndex':'%zu', 'prevLogTerm':'%zu', 'leaderCommit':'%zu', "
-                "'[logTerm':'%zu', 'logCmd':'%s']}\n", r.msg.ae.leaderTerm,
-                r.msg.ae.leaderId.c_str(), r.msg.ae.prevLogIndex, r.msg.ae.prevLogTerm,
-                r.msg.ae.leaderCommit, r.msg.ae.LogEntry.term, r.msg.ae.LogEntry.cmd.c_str());
+                "'[logTerm':'%zu', 'logCmd':'%s']}\n", r.ae().leaderTerm,
+                r.ae().leaderId.c_str(), r.ae().prevLogIndex, r.ae().prevLogTerm,
+                r.ae().leaderCommit, r.ae().LogEntry.term, r.ae().LogEntry.cmd.c_str());
         break;
     case hb_rpc:
         printf("{'type':'hb_rpc', 'leaderTerm':'%zu', 'leaderId':'%s', "
                 "'prevLogIndex':'%zu', 'prevLogTerm':'%zu', 'leaderCommit':'%zu'}\n",
-                r.msg.ae.leaderTerm, r.msg.ae.leaderId.c_str(), r.msg.ae.prevLogIndex,
-                r.msg.ae.prevLogTerm, r.msg.ae.leaderCommit);
+                r.ae().leaderTerm, r.ae().leaderId.c_str(), r.ae().prevLogIndex,
+                r.ae().prevLogTerm, r.ae().leaderCommit);
         break;
     case rv_reply:
         printf("{'type':'rv_reply', 'term':'%zu', 'voted':'%s'}\n",
-                r.msg.reply.term, r.msg.reply.success ? "true" : "false");
+                r.reply().term, r.reply().success ? "true" : "false");
         break;
     case ae_reply:
         printf("{'type':'ae_reply', 'term':'%zu', 'success':'%s'}\n",
-                r.msg.reply.term, r.msg.reply.success ? "true" : "false");
+                r.reply().term, r.reply().success ? "true" : "false");
         break;
     }
 }

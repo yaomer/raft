@@ -37,7 +37,7 @@ void ServerNode::processRpcFromServer(const Angel::TcpConnectionPtr& conn,
     }
 }
 
-void ServerNode::processRpcCommon(const rpc& r)
+void ServerNode::processRpcCommon(rpc& r)
 {
     if (commitIndex > lastApplied) {
         ++lastApplied;
@@ -59,19 +59,17 @@ void ServerNode::processRpcCommon(const rpc& r)
     }
 }
 
-void ServerNode::processRpcAsLeader(const Angel::TcpConnectionPtr& conn,
-                                    const rpc& r)
+void ServerNode::processRpcAsLeader(const Angel::TcpConnectionPtr& conn, rpc& r)
 {
 
 }
 
-void ServerNode::processRpcAsCandidate(const Angel::TcpConnectionPtr& conn,
-                                       const rpc& r)
+void ServerNode::processRpcAsCandidate(const Angel::TcpConnectionPtr& conn, rpc& r)
 {
     // 别的候选人赢得了选举
     if (r.type == hb_rpc) {
         // 如果对方的任期比自己的大，则承认其合法
-        if (r.msg.ae.leaderTerm > currentTerm) {
+        if (r.ae().leaderTerm > currentTerm) {
             role = follower;
             cancelElectionTimer();
             votedFor.clear();
@@ -83,7 +81,7 @@ void ServerNode::processRpcAsCandidate(const Angel::TcpConnectionPtr& conn,
     // 统计票数，如果获得大多数服务器的投票，则当选为新的领导人
     if (r.type != rv_reply) return;
     size_t half = (serverEntries.size() + 1) / 2 + 1;
-    if (r.msg.reply.success && ++votes >= half) {
+    if (r.reply().success && ++votes >= half) {
         role = leader;
         cancelElectionTimer();
         setHeartBeatTimer();
@@ -91,16 +89,15 @@ void ServerNode::processRpcAsCandidate(const Angel::TcpConnectionPtr& conn,
     }
 }
 
-void ServerNode::processRpcAsFollower(const Angel::TcpConnectionPtr& conn,
-                                      const rpc& r)
+void ServerNode::processRpcAsFollower(const Angel::TcpConnectionPtr& conn, rpc& r)
 {
     switch (r.type) {
     case ae_rpc:
         break;
     case rv_rpc:
         if (votedFor.empty()
-                && logAsNewAsCandidate(r.msg.rv.lastLogIndex, r.msg.rv.lastLogTerm)) {
-            votedFor = r.msg.rv.candidateId;
+                && logAsNewAsCandidate(r.rv().lastLogIndex, r.rv().lastLogTerm)) {
+            votedFor = r.rv().candidateId;
             conn->formatSend("rv_reply,%zu,1\r\n", currentTerm);
             printf("voted for %s\n", votedFor.c_str());
         }

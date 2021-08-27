@@ -31,7 +31,7 @@ void ServerNode::initServer()
     static char pid[64] = { 0 };
     snprintf(pid, sizeof(pid), "rlog/%s.log", run_id.c_str());
     rconf.logfile = pid;
-    loop->run_every(rconf.period, [this]{ this->serverCron(); });
+    loop->run_every(rconf.server_cron_period, [this]{ this->serverCron(); });
     log_fd = open(rconf.logfile.c_str(), O_RDWR | O_APPEND | O_CREAT, 0644);
 }
 
@@ -309,7 +309,7 @@ void ServerNode::serverCron()
 // 领导人会周期性地向其他服务器发送心跳包以维持自己的领导地位
 void ServerNode::setHeartBeatTimer()
 {
-    heartbeat_timer_id = loop->run_every(rconf.period, [this]{
+    heartbeat_timer_id = loop->run_every(rconf.heartbeat_period, [this]{
             this->sendHeartBeat();
             });
 }

@@ -13,7 +13,8 @@ struct node_info {
 struct rconf {
     std::vector<node_info> nodes;
     size_t election_timeout = 3000;
-    size_t period = 300;
+    size_t heartbeat_period = 1000;
+    size_t server_cron_period = 100;
     std::string confile = "../raft.conf";
     std::string logfile;
 };

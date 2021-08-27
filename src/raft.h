@@ -66,7 +66,7 @@ public:
 
     void sendLogEntry();
     void recvLogEntryFromLeader(const angel::connection_ptr& conn, AppendEntry& ae);
-    bool votedForCandidate(const angel::connection_ptr& conn, RequestVote& rv);
+    void votedForCandidate(const angel::connection_ptr& conn, RequestVote& rv);
 
     void sendLogEntrySuccessfully(const angel::connection_ptr& conn);
     void sendLogEntryFail(const angel::connection_ptr& conn);
@@ -88,6 +88,8 @@ public:
     size_t getHalf() { return (server_entries.size() + 1) / 2 + 1; }
 
     static std::string generate_runid();
+
+    void info(const char *fmt, ...);
 private:
     bool logUpToDate(size_t, size_t);
     void appendLogEntry(size_t term, const std::string& cmd);
@@ -128,7 +130,7 @@ private:
     size_t election_timer_id = 0;
     size_t heartbeat_timer_id = 0;
     // 最后一次收到心跳包的时间戳(ms)
-    time_t last_recv_heartbeat_time = angel::util::get_cur_time_ms();
+    int64_t last_recv_heartbeat_time = angel::util::get_cur_time_ms();
     int log_fd = -1;
 };
 

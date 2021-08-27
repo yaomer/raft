@@ -12,13 +12,14 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <uuid/uuid.h>
+#include <stdarg.h>
 
 using namespace raft;
 
 void ServerNode::initServer()
 {
     run_id = generate_runid();
-    printf("my runid is %s\n", run_id.c_str());
+    info("my runid is %s", run_id.c_str());
     readConf(rconf.confile);
     for (auto& node : rconf.nodes) {
         if (node.port == server.listen_addr().to_host_port())
@@ -110,7 +111,7 @@ void ServerNode::processrpc(const angel::connection_ptr& conn, rpc& r)
         if (role == LEADER) clearLeaderInfo();
         else if (role == CANDIDATE) clearCandidateInfo();
         else voted_for.clear();
-        if (role != FOLLOWER) printf("convert to follower\n");
+        if (role != FOLLOWER) info("convert to follower");
         role = FOLLOWER;
     }
     switch (role) {
@@ -124,12 +125,13 @@ void ServerNode::processrpc(const angel::connection_ptr& conn, rpc& r)
 void ServerNode::applyLogEntry()
 {
     if (commit_index > last_applied) {
-        printf("log[%zu] is applied to the state machine\n", last_applied);
+        info("log[%zu] is applied to the state machine", last_applied);
         if (role == LEADER) { // 回复客户端
             auto it = clients.find(last_applied);
             assert(it != clients.end());
             auto conn = server.get_connection(it->second);
-            conn->format_send("<reply>%s", log_entries[last_applied].cmd.c_str());
+            if (conn->is_connected())
+                conn->format_send("<reply>%s", log_entries[last_applied].cmd.c_str());
             clients.erase(it);
         }
         ++last_applied;
@@ -205,8 +207,8 @@ void ServerNode::processRpcAsCandidate(const angel::connection_ptr& conn, rpc& r
 
 void ServerNode::becomeNewLeader()
 {
-    printf("become a new leader\n");
     role = LEADER;
+    info("become a new leader");
     cancelElectionTimer();
     setHeartBeatTimer();
     for (auto& serv : server_entries) {
@@ -256,19 +258,18 @@ void ServerNode::updateCommitIndex(AppendEntry& ae)
     }
 }
 
-bool ServerNode::votedForCandidate(const angel::connection_ptr& conn, RequestVote& rv)
+void ServerNode::votedForCandidate(const angel::connection_ptr& conn, RequestVote& rv)
 {
     updateLastRecvHeartbeatTime();
     if ((voted_for.empty() || voted_for == rv.candidate_id)) {
         if (logUpToDate(rv.last_log_index, rv.last_log_term)) {
             voted_for = rv.candidate_id;
             conn->format_send("RV_REPLY,%zu,1\r\n", current_term);
-            printf("voted for %s\n", voted_for.c_str());
-            return true;
+            info("voted for %s", voted_for.c_str());
         }
+    } else {
+        conn->format_send("RV_REPLY,%zu,0\r\n", current_term);
     }
-    conn->format_send("RV_REPLY,%zu,0\r\n", current_term);
-    return false;
 }
 
 // 候选人的日志至少和自己的一样新
@@ -299,7 +300,7 @@ void ServerNode::clearLeaderInfo()
 void ServerNode::serverCron()
 {
     if (role == FOLLOWER) {
-        time_t now = angel::util::get_cur_time_ms();
+        auto now = angel::util::get_cur_time_ms();
         if (now - last_recv_heartbeat_time > rconf.election_timeout) {
             startLeaderElection();
         }
@@ -345,7 +346,7 @@ void ServerNode::startLeaderElection()
     role = CANDIDATE;
     ++current_term;
     votes = 1; // 先给自己投上一票
-    printf("start %zuth leader election\n", current_term);
+    info("start %zuth leader election", current_term);
     setElectionTimer();
     requestServersToVote();
 }
@@ -431,17 +432,34 @@ std::string ServerNode::generate_runid()
 
 void ServerEntry::start(ServerNode *self)
 {
-    client->set_connection_handler([](const angel::connection_ptr& conn){
-            printf("### connect with server %s\n", conn->get_peer_addr().to_host());
+    client->set_connection_handler([self](const angel::connection_ptr& conn){
+            self->info("### connect with server %s", conn->get_peer_addr().to_host());
             });
     client->set_message_handler([self](const angel::connection_ptr& conn, angel::buffer& buf){
             self->processRpcFromServer(conn, buf);
             });
-    client->set_close_handler([](const angel::connection_ptr& conn){
-            printf("### disconnect with server %s\n", conn->get_peer_addr().to_host());
+    client->set_close_handler([self](const angel::connection_ptr& conn){
+            self->info("### disconnect with server %s", conn->get_peer_addr().to_host());
             });
     client->not_exit_loop();
     client->start();
+}
+
+void ServerNode::info(const char *fmt, ...)
+{
+    // Here you can disable the output.
+	va_list		ap;
+    char buf[4096];
+    const char *rolestr;
+    switch (role) {
+    case LEADER: rolestr = "leader:    "; break;
+    case CANDIDATE: rolestr = "candidate: "; break;
+    case FOLLOWER: rolestr = "follower:  "; break;
+    }
+	va_start(ap, fmt);
+	vsnprintf(buf, sizeof(buf), fmt, ap);
+    fprintf(stdout, "%s%s\n", rolestr, buf);
+	va_end(ap);
 }
 
 int main(int argc, char *argv[])

@@ -19,25 +19,19 @@ enum Role {
     LEADER,
 };
 
-struct rconf {
-    const size_t election_timeout = 3000;
-    const size_t period = 300;
-    const char *confile = "raft.conf";
-    const char *logfile;
-} rconf;
-
 class ServerNode;
 
 struct ServerEntry {
     ServerEntry(angel::evloop *loop, angel::inet_addr conn_addr)
-        : client(new angel::client(loop, conn_addr))
+        : client(new angel::client(loop, conn_addr, true, 1000))
     {
     }
     void start(ServerNode *self);
     std::unique_ptr<angel::client> client; // 到该服务器的连接
+    // 初始化为领导人上一条日志的索引值+1
     size_t next_index = 0;  // 发送给该服务器的下一条日志条目的索引
     // match_index=1表示log_entries[0]已经复制到该服务器上了
-    size_t match_index = 0; // 已经复制到该服务器上的最大日志的索引
+    size_t match_index = 0; // 已经复制到该服务器上的最大日志的索引+1
 };
 
 class ServerNode {
@@ -65,18 +59,20 @@ public:
     void process(const angel::connection_ptr& conn, angel::buffer& buf);
     void processRpcFromServer(const angel::connection_ptr& conn, angel::buffer& buf);
     void processrpc(const angel::connection_ptr& conn, rpc& r);
-    void checkExpiredRpc(rpc& r);
     void applyLogEntry();
     void processRpcAsLeader(const angel::connection_ptr& conn, rpc& r);
     void processRpcAsCandidate(const angel::connection_ptr& conn, rpc& r);
     void processRpcAsFollower(const angel::connection_ptr& conn, rpc& r);
 
-    void sendLogEntryToServers();
-    void recvLogEntryFromLeader(const angel::connection_ptr& conn, rpc& r);
-    void votedForCandidate(const angel::connection_ptr& conn, rpc& r);
+    void sendLogEntry();
+    void recvLogEntryFromLeader(const angel::connection_ptr& conn, AppendEntry& ae);
+    bool votedForCandidate(const angel::connection_ptr& conn, RequestVote& rv);
+
+    void sendLogEntrySuccessfully(const angel::connection_ptr& conn);
+    void sendLogEntryFail(const angel::connection_ptr& conn);
 
     void setHeartBeatTimer();
-    void sendHeartBeatToServers();
+    void sendHeartBeat();
     void cancelHeartBeatTimer();
 
     void startLeaderElection();
@@ -84,16 +80,26 @@ public:
     void cancelElectionTimer();
     void requestServersToVote();
     void becomeNewLeader();
+
+    // nodes = 2, half = 2
+    // nodes = 3, half = 2
+    // nodes = 4, half = 3
+    // nodes = 5, half = 3
+    size_t getHalf() { return (server_entries.size() + 1) / 2 + 1; }
+
+    static std::string generate_runid();
 private:
-    bool logAsNewAsCandidate(size_t, size_t);
+    bool logUpToDate(size_t, size_t);
     void appendLogEntry(size_t term, const std::string& cmd);
+    void updateCommitIndex(AppendEntry& ae);
+    void updateLastRecvHeartbeatTime()
+    {
+        last_recv_heartbeat_time = angel::util::get_cur_time_ms();
+    }
     // remove log_entries[from, end] and sync changes to [logfile]
     void removeLogEntry(size_t from);
-    void rebuildLogFile();
     void clearCandidateInfo();
-
-    void setRunId();
-    void readConf();
+    void clearLeaderInfo();
 
     // 在所有服务器上持久存在的
     std::string run_id;         // 服务器的运行时id（分布式唯一id）
@@ -109,8 +115,10 @@ private:
     // last_applied=1表示log_entries[0]已被应用到状态机了
     size_t last_applied = 0;    // 被状态机执行的最大日志条目的索引
     ////////////////////////////////////////////////////
-    // 在leader服务器上不稳定存在的（赢得选举之后初始化）
+    // 在领导人服务器上不稳定存在的（赢得选举之后初始化）
     ServerEntryMap server_entries;
+    ////////////////////////////////////////////////////
+    // 具体实现需要的一些数据
     Role role = FOLLOWER;
     angel::evloop *loop;
     angel::server server;
@@ -122,7 +130,6 @@ private:
     // 最后一次收到心跳包的时间戳(ms)
     time_t last_recv_heartbeat_time = angel::util::get_cur_time_ms();
     int log_fd = -1;
-    size_t half;
 };
 
 }

@@ -1,4 +1,5 @@
 #include "raft.h"
+#include "config.h"
 
 #include <iostream>
 #include <random>
@@ -10,20 +11,28 @@
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <uuid/uuid.h>
 
 using namespace raft;
 
 void ServerNode::initServer()
 {
-    setRunId();
-    readConf();
+    run_id = generate_runid();
+    printf("my runid is %s\n", run_id.c_str());
+    readConf(rconf.confile);
+    for (auto& node : rconf.nodes) {
+        if (node.port == server.listen_addr().to_host_port())
+            continue;
+        auto se = new ServerEntry(loop, angel::inet_addr(node.ip.c_str(), node.port));
+        se->start(this);
+        server_entries.emplace(node.ip + ":" + std::to_string(node.port), se);
+    }
     mkdir("rlog", 0777);
     static char pid[64] = { 0 };
     snprintf(pid, sizeof(pid), "rlog/%s.log", run_id.c_str());
     rconf.logfile = pid;
     loop->run_every(rconf.period, [this]{ this->serverCron(); });
-    log_fd = open(rconf.logfile, O_RDWR | O_APPEND | O_CREAT, 0644);
-    half = (server_entries.size() + 1) / 2 + 1;
+    log_fd = open(rconf.logfile.c_str(), O_RDWR | O_APPEND | O_CREAT, 0644);
 }
 
 void ServerNode::process(const angel::connection_ptr& conn,
@@ -37,7 +46,7 @@ void ServerNode::process(const angel::connection_ptr& conn,
             if (role == LEADER) {
                 appendLogEntry(current_term, std::string(buf.peek() + 6, crlf - 6));
                 clients.emplace(log_entries.size() - 1, conn->id());
-                sendLogEntryToServers();
+                sendLogEntry();
             } else {
                 // 重定向
                 conn->send(">I'm not a leader<");
@@ -50,24 +59,26 @@ void ServerNode::process(const angel::connection_ptr& conn,
     }
 }
 
-void ServerNode::sendLogEntryToServers()
+void ServerNode::sendLogEntry()
 {
-    size_t last_log_index = log_entries.size();
-    auto& le = log_entries[log_entries.size()-1];
-    for (auto& serv : server_entries) {
-        auto& client = serv.second->client;
-        if (client->is_connected()) {
-            if (last_log_index <= 1) {
-                // 这里暂时不考虑cmd中包含二进制数据，假定都是ASCII字符
-                client->conn()->format_send("AE_RPC,%zu,%s,%zu,%zu,%zu,%zu,%s\r\n",
-                        current_term, run_id.c_str(), 0, 0, commit_index,
-                        le.leader_term, le.cmd.c_str());
-            } else {
-                size_t prev_log_index = last_log_index - 2;
-                size_t prev_log_term = log_entries[prev_log_index].leader_term;
-                client->conn()->format_send("AE_RPC,%zu,%s,%zu,%zu,%zu,%zu,%s\r\n",
-                        current_term, run_id.c_str(), prev_log_index, prev_log_term,
-                        commit_index, le.leader_term, le.cmd.c_str());
+    for (auto& [name, serv] : server_entries) {
+        if (serv->client->is_connected()) {
+            auto& log_entry = log_entries[serv->next_index];
+            size_t prev_log_index = 0;
+            size_t prev_log_term = 0;
+            if (serv->next_index > 0) {
+                prev_log_index = serv->next_index - 1;
+                prev_log_term = log_entries[prev_log_index].leader_term;
+            }
+            // 这里暂时不考虑cmd中包含二进制数据，假定都是ASCII字符
+            serv->client->conn()->format_send("AE_RPC,%zu,%s,%zu,%zu,%zu,%zu,%s\r\n",
+                    current_term, run_id.c_str(), prev_log_index, prev_log_term,
+                    commit_index, log_entry.leader_term, log_entry.cmd.c_str());
+            for (size_t n = commit_index; n < serv->match_index; n++) {
+                if (log_entries[n].leader_term == current_term) {
+                    commit_index = n;
+                    break;
+                }
             }
         }
     }
@@ -90,7 +101,18 @@ void ServerNode::processRpcFromServer(const angel::connection_ptr& conn,
 
 void ServerNode::processrpc(const angel::connection_ptr& conn, rpc& r)
 {
-    checkExpiredRpc(r);
+    int term = getterm(r);
+    if (term < current_term) {
+        return;
+    }
+    if (term > current_term) {
+        current_term = term;
+        if (role == LEADER) clearLeaderInfo();
+        else if (role == CANDIDATE) clearCandidateInfo();
+        else voted_for.clear();
+        if (role != FOLLOWER) printf("convert to follower\n");
+        role = FOLLOWER;
+    }
     switch (role) {
     case LEADER: processRpcAsLeader(conn, r); break;
     case CANDIDATE: processRpcAsCandidate(conn, r); break;
@@ -99,80 +121,91 @@ void ServerNode::processrpc(const angel::connection_ptr& conn, rpc& r)
     applyLogEntry();
 }
 
-void ServerNode::checkExpiredRpc(rpc& r)
-{
-    size_t term = getterm(r);
-    if (term > current_term) {
-        current_term = term;
-        if (role == CANDIDATE) {
-            clearCandidateInfo();
-        }
-        if (role == LEADER) {
-            cancelHeartBeatTimer();
-        }
-        role = FOLLOWER;
-        printf("convert to follower\n");
-    }
-}
-
 void ServerNode::applyLogEntry()
 {
     if (commit_index > last_applied) {
         printf("log[%zu] is applied to the state machine\n", last_applied);
-        ++last_applied;
         if (role == LEADER) { // 回复客户端
-            auto it = clients.find(last_applied-1);
+            auto it = clients.find(last_applied);
             assert(it != clients.end());
             auto conn = server.get_connection(it->second);
-            conn->format_send("<reply>%s", log_entries[last_applied-1].cmd.c_str());
+            conn->format_send("<reply>%s", log_entries[last_applied].cmd.c_str());
             clients.erase(it);
         }
+        ++last_applied;
     }
 }
 
 void ServerNode::processRpcAsLeader(const angel::connection_ptr& conn, rpc& r)
 {
-    assert(r.type == AE_REPLY);
-    char name[32] = { 0 };
-    snprintf(name, sizeof(name), "%s:%d",
-            conn->get_peer_addr().to_host_ip(), conn->get_peer_addr().to_host_port());
-    auto it = server_entries.find(name);
+    switch (r.type) {
+    case AE_REPLY:
+        if (r.reply().success) sendLogEntrySuccessfully(conn);
+        else sendLogEntryFail(conn);
+        break;
+    }
+}
+
+void ServerNode::sendLogEntrySuccessfully(const angel::connection_ptr& conn)
+{
+    auto it = server_entries.find(conn->get_peer_addr().to_host());
     assert(it != server_entries.end());
     it->second->next_index++;
     it->second->match_index = it->second->next_index;
-    size_t commits = 0;
+    size_t commits = 1;
     for (auto& serv : server_entries) {
         if (serv.second->match_index == commit_index + 1)
             commits++;
     }
     // 如果一条日志复制到了大多数机器上，则称为可提交的
-    if (commits >= half) {
+    if (commits >= getHalf()) {
         commit_index++;
+    }
+}
+
+// 失败的话，递减next_index，并重新发送之后的所有日志条目
+void ServerNode::sendLogEntryFail(const angel::connection_ptr& conn)
+{
+    auto it = server_entries.find(conn->get_peer_addr().to_host());
+    assert(it != server_entries.end());
+    assert(it->second->next_index-- > 0);
+    for (size_t idx = it->second->next_index; idx < log_entries.size(); idx++) {
+        auto& log_entry = log_entries[idx];
+        size_t prev_log_index = 0;
+        size_t prev_log_term = 0;
+        if (idx > 0) {
+            prev_log_index = idx - 1;
+            prev_log_term = log_entries[prev_log_index].leader_term;
+        }
+        it->second->client->conn()->format_send("AE_RPC,%zu,%s,%zu,%zu,%zu,%zu,%s\r\n",
+                current_term, run_id.c_str(), prev_log_index, prev_log_term,
+                commit_index, log_entry.leader_term, log_entry.cmd.c_str());
     }
 }
 
 void ServerNode::processRpcAsCandidate(const angel::connection_ptr& conn, rpc& r)
 {
-    // 别的候选人赢得了选举
-    if (r.type == HB_RPC) {
-        // 如果对方的任期比自己的大，则承认其合法
-        if (r.ae().leader_term > current_term) {
+    switch (r.type) {
+    case HB_RPC:
+        // 别的候选人赢得了选举
+        if (r.ae().leader_term == current_term) {
             clearCandidateInfo();
             role = FOLLOWER;
         }
-        last_recv_heartbeat_time = angel::util::get_cur_time_ms();
-        return;
-    }
-    // 统计票数，如果获得大多数服务器的投票，则当选为新的领导人
-    assert(r.type == RV_REPLY);
-    if (r.reply().success && ++votes >= half) {
-        becomeNewLeader();
-        printf("become a new leader\n");
+        updateLastRecvHeartbeatTime();
+        break;
+    case RV_REPLY:
+        // 统计票数，如果获得大多数服务器的投票，则当选为新的领导人
+        if (r.reply().success && ++votes >= getHalf()) {
+            becomeNewLeader();
+        }
+        break;
     }
 }
 
 void ServerNode::becomeNewLeader()
 {
+    printf("become a new leader\n");
     role = LEADER;
     cancelElectionTimer();
     setHeartBeatTimer();
@@ -185,47 +218,70 @@ void ServerNode::becomeNewLeader()
 void ServerNode::processRpcAsFollower(const angel::connection_ptr& conn, rpc& r)
 {
     switch (r.type) {
-    case AE_RPC: recvLogEntryFromLeader(conn, r); break;
-    case RV_RPC: votedForCandidate(conn, r); break;
-    case HB_RPC: last_recv_heartbeat_time = angel::util::get_cur_time_ms(); break;
+    case AE_RPC: recvLogEntryFromLeader(conn, r.ae()); break;
+    case RV_RPC: votedForCandidate(conn, r.rv()); break;
+    case HB_RPC:
+        updateLastRecvHeartbeatTime();
+        updateCommitIndex(r.ae());
+        break;
     }
 }
 
-void ServerNode::recvLogEntryFromLeader(const angel::connection_ptr& conn, rpc& r)
+void ServerNode::recvLogEntryFromLeader(const angel::connection_ptr& conn, AppendEntry& ae)
 {
-    if (r.ae().leader_term < current_term) goto fail;
-    if (r.ae().prev_log_term > 0) { // 进行一致性检查
-        if (log_entries[r.ae().prev_log_index].leader_term != r.ae().prev_log_term) goto fail;
-        if (log_entries.size() >= r.ae().prev_log_index + 2
-                && log_entries[r.ae().prev_log_index+1].leader_term != r.ae().log_entry.leader_term) {
-            removeLogEntry(r.ae().prev_log_index+1);
+    if (ae.prev_log_term > 0) { // 进行一致性检查
+        // 如果上一条日志不匹配，就返回false
+        if (log_entries[ae.prev_log_index].leader_term != ae.prev_log_term) {
+            conn->format_send("AE_REPLY,%zu,%d\r\n", current_term, 0);
+            return;
+        }
+        // 如果一条已经存在的日志与新的日志冲突（index相同但是term不同），
+        // 就删除已经存在的日志和它之后所有的日志
+        int new_index = ae.prev_log_index + 1;
+        if (log_entries.size() > new_index
+                && log_entries[new_index].leader_term != ae.log_entry.leader_term) {
+            removeLogEntry(new_index);
         }
     }
-    appendLogEntry(r.ae().log_entry.leader_term, r.ae().log_entry.cmd);
-    if (r.ae().leader_commit > commit_index) {
-        commit_index = std::min(r.ae().leader_commit, log_entries.size()-1, std::less<size_t>());
-    }
+    // 追加新日志
+    appendLogEntry(ae.log_entry.leader_term, ae.log_entry.cmd);
+    updateCommitIndex(ae);
     conn->format_send("AE_REPLY,%zu,%d\r\n", current_term, 1);
-    return;
-fail:
-    conn->format_send("AE_REPLY,%zu,%d\r\n", current_term, 0);
 }
 
-void ServerNode::votedForCandidate(const angel::connection_ptr& conn, rpc& r)
+void ServerNode::updateCommitIndex(AppendEntry& ae)
 {
-    if (voted_for.empty()
-            && logAsNewAsCandidate(r.rv().last_log_index, r.rv().last_log_term)) {
-        voted_for = r.rv().candidate_id;
-        conn->format_send("RV_REPLY,%zu,1\r\n", current_term);
-        printf("voted for %s\n", voted_for.c_str());
+    if (ae.leader_commit > commit_index) {
+        commit_index = std::min(ae.leader_commit, log_entries.size());
     }
 }
 
-bool ServerNode::logAsNewAsCandidate(size_t last_log_index, size_t last_log_term)
+bool ServerNode::votedForCandidate(const angel::connection_ptr& conn, RequestVote& rv)
 {
-    return (last_log_term == 0 || log_entries.empty())
-        || (log_entries.size() - 1 < last_log_index)
-        || (log_entries[last_log_index].leader_term == last_log_term);
+    updateLastRecvHeartbeatTime();
+    if ((voted_for.empty() || voted_for == rv.candidate_id)) {
+        if (logUpToDate(rv.last_log_index, rv.last_log_term)) {
+            voted_for = rv.candidate_id;
+            conn->format_send("RV_REPLY,%zu,1\r\n", current_term);
+            printf("voted for %s\n", voted_for.c_str());
+            return true;
+        }
+    }
+    conn->format_send("RV_REPLY,%zu,0\r\n", current_term);
+    return false;
+}
+
+// 候选人的日志至少和自己的一样新
+bool ServerNode::logUpToDate(size_t last_log_index, size_t last_log_term)
+{
+    if (last_log_term == 0) return true;
+    assert(log_entries.size() > 0);
+    auto& last_log = log_entries.back();
+    if (last_log_term == last_log.leader_term) {
+        return last_log_index >= log_entries.size() - 1;
+    } else {
+        return last_log_term > last_log.leader_term;
+    }
 }
 
 void ServerNode::clearCandidateInfo()
@@ -235,12 +291,18 @@ void ServerNode::clearCandidateInfo()
     votes = 0;
 }
 
+void ServerNode::clearLeaderInfo()
+{
+    cancelHeartBeatTimer();
+}
+
 void ServerNode::serverCron()
 {
     if (role == FOLLOWER) {
         time_t now = angel::util::get_cur_time_ms();
-        if (now - last_recv_heartbeat_time > rconf.election_timeout)
+        if (now - last_recv_heartbeat_time > rconf.election_timeout) {
             startLeaderElection();
+        }
     }
 }
 
@@ -248,11 +310,11 @@ void ServerNode::serverCron()
 void ServerNode::setHeartBeatTimer()
 {
     heartbeat_timer_id = loop->run_every(rconf.period, [this]{
-            this->sendHeartBeatToServers();
+            this->sendHeartBeat();
             });
 }
 
-void ServerNode::sendHeartBeatToServers()
+void ServerNode::sendHeartBeat()
 {
     size_t last_log_index = log_entries.size();
     for (auto& serv : server_entries) {
@@ -280,14 +342,12 @@ void ServerNode::cancelHeartBeatTimer()
 // 发起新一轮选举
 void ServerNode::startLeaderElection()
 {
-    // 在这轮选举结束前不能再发起选举
-    if (election_timer_id > 0) return;
     role = CANDIDATE;
     ++current_term;
     votes = 1; // 先给自己投上一票
+    printf("start %zuth leader election\n", current_term);
     setElectionTimer();
     requestServersToVote();
-    printf("start %zuth leader election\n", current_term);
 }
 
 void ServerNode::setElectionTimer()
@@ -296,7 +356,6 @@ void ServerNode::setElectionTimer()
     // ~(150 ~ 300)ms
     time_t timeout = rconf.election_timeout + (::rand() % 151 + 150);
     election_timer_id = loop->run_after(timeout, [this]{
-            this->election_timer_id = 0;
             this->startLeaderElection();
             });
 }
@@ -333,100 +392,61 @@ void ServerNode::appendLogEntry(size_t term, const std::string& cmd)
     iov[1].iov_len = cmd.size();
     iov[2].iov_base = const_cast<char*>("\r\n");
     iov[2].iov_len = 2;
-    log_entries.emplace_back(current_term, cmd);
+    log_entries.emplace_back(term, cmd);
     writev(log_fd, iov, 3);
     fsync(log_fd);
 }
 
 void ServerNode::removeLogEntry(size_t from)
 {
-    printf("remove log_entries from %zu\n", from);
-    size_t end = log_entries.size();
-    for (size_t i = from; i < end; i++)
+    off_t remove_bytes = 0;
+    while (from < log_entries.size()) {
+        auto& end = log_entries.back();
+        remove_bytes += sizeof(end.leader_term) + end.cmd.size() + 2;
         log_entries.pop_back();
-    rebuildLogFile();
-}
-
-// 为了移除[logfile]中[from]之后的所有日志，我们创建一个新的文件，
-// 将[from]之前的日志写入到新文件中，然后rename()原子的替换原文件，
-// 我们把这个过程称为[rebuild]
-// 很显然，当日志文件很大时，这种方法就很不合适了
-// 一种简单的处理是：将日志写到多个小文件中，这样[rebuild]的代价就很小了
-void ServerNode::rebuildLogFile()
-{
-    char tmpfile[32] = "tmp.XXXXXX";
-    mktemp(tmpfile);
-    int tmpFd = open(tmpfile, O_RDWR | O_APPEND | O_CREAT, 0644);
+    }
     struct stat st;
     fstat(log_fd, &st);
-    size_t rebuildlogs = log_entries.size();
+    off_t remain_bytes = st.st_size - remove_bytes;
+    char tmpfile[32] = "tmp.XXXXXX";
+    mktemp(tmpfile);
+    int tmpfd = open(tmpfile, O_RDWR | O_APPEND | O_CREAT, 0644);
     char *start = static_cast<char*>(
-            mmap(nullptr, st.st_size, PROT_READ, MAP_SHARED, log_fd, 0));
-    const char *s = start;
-    const char *es = s + st.st_size;
-    const char *sep = "\r\n";
-    const char *p;
-    while (true) {
-        p = std::search(s, es, sep, sep + 2);
-        assert(p != es);
-        if (--rebuildlogs == 0) break;
-        s = p + 1;
-    }
-    write(tmpFd, start, p+2-start);
-    fsync(tmpFd);
-    close(tmpFd);
+            mmap(nullptr, remain_bytes, PROT_READ, MAP_SHARED, log_fd, 0));
+    write(tmpfd, start, remain_bytes);
+    fsync(tmpfd);
+    close(tmpfd);
     munmap(start, st.st_size);
-    rename(tmpfile, rconf.logfile);
+    rename(tmpfile, rconf.logfile.c_str());
 }
 
-void ServerNode::setRunId()
+std::string ServerNode::generate_runid()
 {
-    run_id.reserve(33);
-    char *buf = &run_id[0];
-    struct timespec tsp;
-    clock_gettime(_CLOCK_REALTIME, &tsp);
-    std::uniform_int_distribution<size_t> u;
-    std::mt19937_64 e(tsp.tv_sec * 1000000000 + tsp.tv_nsec);
-    snprintf(buf, 17, "%lx", u(e));
-    snprintf(buf + 16, 17, "%lx", u(e));
+    char out[33] = { 0 };
+    uuid_t uu;
+    uuid_generate(uu);
+    uuid_unparse_lower(uu, out);
+    return out;
 }
 
 void ServerEntry::start(ServerNode *self)
 {
+    client->set_connection_handler([](const angel::connection_ptr& conn){
+            printf("### connect with server %s\n", conn->get_peer_addr().to_host());
+            });
     client->set_message_handler([self](const angel::connection_ptr& conn, angel::buffer& buf){
             self->processRpcFromServer(conn, buf);
+            });
+    client->set_close_handler([](const angel::connection_ptr& conn){
+            printf("### disconnect with server %s\n", conn->get_peer_addr().to_host());
             });
     client->not_exit_loop();
     client->start();
 }
 
-#define error(str) \
-    { fprintf(stderr, str"\n"); abort(); }
-
-void ServerNode::readConf()
-{
-    char buf[1024];
-    FILE *fp = fopen("raft.conf", "r");
-    if (!fp) error("can't open raft.conf");
-    while (::fgets(buf, sizeof(buf), fp)) {
-        if (buf[0] == '#') continue;
-        std::string ip, port;
-        const char *s = buf, *es = s + strlen(buf) - 1;
-        const char *p = std::find(s, es, ':');
-        if (p == es) error("parse conf error");
-        ip.assign(s, p);
-        port.assign(p + 1, es);
-        if (atoi(port.c_str()) == server.listen_addr().to_host_port())
-            continue;
-        auto se = new ServerEntry(loop, angel::inet_addr(ip.c_str(), atoi(port.c_str())));
-        se->start(this);
-        server_entries.emplace(ip+":"+port, se);
-    }
-    fclose(fp);
-}
-
 int main(int argc, char *argv[])
 {
+    angel::set_log_level(angel::logger::level::info);
     angel::evloop loop;
     if (argc != 2) {
         printf("usage: serv [listen port]\n");

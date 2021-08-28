@@ -64,7 +64,7 @@ void ServerNode::sendLogEntry()
 {
     for (auto& [name, serv] : server_entries) {
         if (serv->client->is_connected()) {
-            auto& log_entry = log_entries[serv->next_index];
+            auto& next_log = log_entries[serv->next_index];
             size_t prev_log_index = 0;
             size_t prev_log_term = 0;
             if (serv->next_index > 0) {
@@ -74,7 +74,7 @@ void ServerNode::sendLogEntry()
             // 这里暂时不考虑cmd中包含二进制数据，假定都是ASCII字符
             serv->client->conn()->format_send("AE_RPC,%zu,%s,%zu,%zu,%zu,%zu,%s\r\n",
                     current_term, run_id.c_str(), prev_log_index, prev_log_term,
-                    commit_index, log_entry.leader_term, log_entry.cmd.c_str());
+                    commit_index, next_log.leader_term, next_log.cmd.c_str());
             for (size_t n = commit_index; n < serv->match_index; n++) {
                 if (log_entries[n].leader_term == current_term) {
                     commit_index = n;
@@ -125,13 +125,15 @@ void ServerNode::processrpc(const angel::connection_ptr& conn, rpc& r)
 void ServerNode::applyLogEntry()
 {
     if (commit_index > last_applied) {
-        info("log[%zu] is applied to the state machine", last_applied);
+        auto& apply_log = log_entries[last_applied];
+        info("log[%zu](%zu, %s) is applied to the state machine",
+                last_applied, apply_log.leader_term, apply_log.cmd.c_str());
         if (role == LEADER) { // 回复客户端
             auto it = clients.find(last_applied);
             assert(it != clients.end());
             auto conn = server.get_connection(it->second);
             if (conn->is_connected())
-                conn->format_send("<reply>%s", log_entries[last_applied].cmd.c_str());
+                conn->format_send("<reply>%s", apply_log.cmd.c_str());
             clients.erase(it);
         }
         ++last_applied;
@@ -172,7 +174,7 @@ void ServerNode::sendLogEntryFail(const angel::connection_ptr& conn)
     assert(it != server_entries.end());
     assert(it->second->next_index-- > 0);
     for (size_t idx = it->second->next_index; idx < log_entries.size(); idx++) {
-        auto& log_entry = log_entries[idx];
+        auto& next_log = log_entries[idx];
         size_t prev_log_index = 0;
         size_t prev_log_term = 0;
         if (idx > 0) {
@@ -181,7 +183,7 @@ void ServerNode::sendLogEntryFail(const angel::connection_ptr& conn)
         }
         it->second->client->conn()->format_send("AE_RPC,%zu,%s,%zu,%zu,%zu,%zu,%s\r\n",
                 current_term, run_id.c_str(), prev_log_index, prev_log_term,
-                commit_index, log_entry.leader_term, log_entry.cmd.c_str());
+                commit_index, next_log.leader_term, next_log.cmd.c_str());
     }
 }
 
@@ -328,7 +330,7 @@ void ServerNode::sendHeartBeat()
             } else {
                 size_t prev_log_index = last_log_index - 2;
                 size_t prev_log_term = log_entries[prev_log_index].leader_term;
-                conn->format_send("HB_RPC,%zu,%s,%zu,%zu\r\n",
+                conn->format_send("HB_RPC,%zu,%s,%zu,%zu,%zu\r\n",
                         current_term, run_id.c_str(), prev_log_index, prev_log_term, commit_index);
             }
         }
@@ -396,6 +398,7 @@ void ServerNode::appendLogEntry(size_t term, const std::string& cmd)
     log_entries.emplace_back(term, cmd);
     writev(log_fd, iov, 3);
     fsync(log_fd);
+    info("append new log[%zu](%zu, %s)", log_entries.size() - 1, term, cmd.c_str());
 }
 
 void ServerNode::removeLogEntry(size_t from)

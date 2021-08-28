@@ -87,7 +87,7 @@ public:
     // nodes = 5, half = 3
     size_t getHalf() { return (server_entries.size() + 1) / 2 + 1; }
 
-    static std::string generate_runid();
+    static std::string generateRunid();
 
     void info(const char *fmt, ...);
 private:

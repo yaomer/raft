@@ -18,7 +18,7 @@ using namespace raft;
 
 void ServerNode::initServer()
 {
-    run_id = generate_runid();
+    run_id = generateRunid();
     info("my runid is %s", run_id.c_str());
     readConf(rconf.confile);
     for (auto& node : rconf.nodes) {
@@ -53,7 +53,7 @@ void ServerNode::process(const angel::connection_ptr& conn,
                 conn->send(">I'm not a leader<");
             }
         } else { // 内部通信
-            parserpc(r, buf.peek(), buf.peek() + crlf);
+            r.parse(buf.peek(), buf.peek() + crlf);
             processrpc(conn, r);
         }
         buf.retrieve(crlf + 2);
@@ -92,7 +92,7 @@ void ServerNode::processRpcFromServer(const angel::connection_ptr& conn,
     while (buf.readable() > 2) {
         int crlf = buf.find_crlf();
         if (crlf >= 0) {
-            parserpc(r, buf.peek(), buf.peek() + crlf);
+            r.parse(buf.peek(), buf.peek() + crlf);
             processrpc(conn, r);
             buf.retrieve(crlf + 2);
         } else
@@ -102,7 +102,7 @@ void ServerNode::processRpcFromServer(const angel::connection_ptr& conn,
 
 void ServerNode::processrpc(const angel::connection_ptr& conn, rpc& r)
 {
-    int term = getterm(r);
+    auto term = r.getterm();
     if (term < current_term) {
         return;
     }
@@ -140,7 +140,7 @@ void ServerNode::applyLogEntry()
 
 void ServerNode::processRpcAsLeader(const angel::connection_ptr& conn, rpc& r)
 {
-    switch (r.type) {
+    switch (r.gettype()) {
     case AE_REPLY:
         if (r.reply().success) sendLogEntrySuccessfully(conn);
         else sendLogEntryFail(conn);
@@ -187,7 +187,7 @@ void ServerNode::sendLogEntryFail(const angel::connection_ptr& conn)
 
 void ServerNode::processRpcAsCandidate(const angel::connection_ptr& conn, rpc& r)
 {
-    switch (r.type) {
+    switch (r.gettype()) {
     case HB_RPC:
         // 别的候选人赢得了选举
         if (r.ae().leader_term == current_term) {
@@ -219,7 +219,7 @@ void ServerNode::becomeNewLeader()
 
 void ServerNode::processRpcAsFollower(const angel::connection_ptr& conn, rpc& r)
 {
-    switch (r.type) {
+    switch (r.gettype()) {
     case AE_RPC: recvLogEntryFromLeader(conn, r.ae()); break;
     case RV_RPC: votedForCandidate(conn, r.rv()); break;
     case HB_RPC:
@@ -421,7 +421,7 @@ void ServerNode::removeLogEntry(size_t from)
     rename(tmpfile, rconf.logfile.c_str());
 }
 
-std::string ServerNode::generate_runid()
+std::string ServerNode::generateRunid()
 {
     char out[33] = { 0 };
     uuid_t uu;

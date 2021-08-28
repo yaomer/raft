@@ -3,7 +3,7 @@
 #include <unordered_map>
 #include <iostream>
 
-using namespace raft;
+namespace raft {
 
 // ==================================================================================================
 // [AE_RPC] [AE_RPC,leader_term,leader_id,prev_log_index,prev_log_term,leader_commit,log_entry(term,cmd)\r\n]
@@ -41,16 +41,15 @@ static std::vector<size_t> split(const char *s, const char *es, char c)
 }
 
 // for [AE_REPLY,1,1\r\n], s -> 'a', es -> '\r'
-void raft::parserpc(rpc& r, const char *s, const char *es)
+void rpc::parse(const char *s, const char *es)
 {
     const char *p = std::find(s, es, ',');
-    std::string type(s, p);
-    r.type = getrpctype(type);
-    if (r.type == NONE) return;
+    type = getrpctype(std::string(s, p));
+    if (type == NONE) return;
     p += 1; // skip ','
     auto indexs = split(p, es, ',');
     std::string ts;
-    switch (r.type) {
+    switch (type) {
     case AE_RPC: case HB_RPC: {
         AppendEntry ae;
         ts.assign(p, p + indexs[0]);
@@ -60,10 +59,10 @@ void raft::parserpc(rpc& r, const char *s, const char *es)
         ae.prev_log_index = stoul(ts);
         ts.assign(p + indexs[2] + 1, p + indexs[3]);
         ae.prev_log_term = stoul(ts);
-        if (r.type == HB_RPC) {
+        if (type == HB_RPC) {
             ts.assign(p + indexs[3] + 1, es);
             ae.leader_commit = stoul(ts);
-            r.msg = ae;
+            msg = ae;
             break;
         }
         ts.assign(p + indexs[3] + 1, p + indexs[4]);
@@ -71,7 +70,7 @@ void raft::parserpc(rpc& r, const char *s, const char *es)
         ts.assign(p + indexs[4] + 1, p + indexs[5]);
         ae.log_entry.leader_term = stoul(ts);
         ae.log_entry.cmd.assign(p + indexs[5] + 1, es);
-        r.msg = ae;
+        msg = ae;
         break;
     }
     case RV_RPC: {
@@ -83,7 +82,7 @@ void raft::parserpc(rpc& r, const char *s, const char *es)
         rv.last_log_index = stoul(ts);
         ts.assign(p + indexs[2] + 1, es);
         rv.last_log_term = stoul(ts);
-        r.msg = rv;
+        msg = rv;
         break;
     }
     case AE_REPLY: case RV_REPLY: {
@@ -92,7 +91,7 @@ void raft::parserpc(rpc& r, const char *s, const char *es)
         reply.term = stoul(ts);
         ts.assign(p + indexs[0] + 1, es);
         reply.success = stoi(ts);
-        r.msg = reply;
+        msg = reply;
         break;
     }
     case NONE:
@@ -100,49 +99,51 @@ void raft::parserpc(rpc& r, const char *s, const char *es)
     }
 }
 
-size_t raft::getterm(rpc& r)
+size_t rpc::getterm()
 {
-    switch (r.type) {
+    switch (type) {
     case AE_RPC: case HB_RPC:
-        return r.ae().leader_term;
+        return ae().leader_term;
     case RV_RPC:
-        return r.rv().candidate_term;
+        return rv().candidate_term;
     case AE_REPLY: case RV_REPLY:
-        return r.reply().term;
+        return reply().term;
     }
     return 0;
 }
 
 // format print rpc for debug
-void raft::printrpc(rpc& r)
+void rpc::print()
 {
-    switch (r.type) {
+    switch (type) {
     case RV_RPC:
         printf("{'type':'RV_RPC', 'candidate_term':'%zu', 'candidate_id':'%s', "
                 "'last_log_index':'%zu', 'last_log_term':'%zu'}\n",
-                r.rv().candidate_term, r.rv().candidate_id.c_str(),
-                r.rv().last_log_index, r.rv().last_log_term);
+                rv().candidate_term, rv().candidate_id.c_str(),
+                rv().last_log_index, rv().last_log_term);
         break;
     case AE_RPC:
         printf("{'type':'AE_RPC', 'leader_term':'%zu', 'leader_id':'%s', "
                 "'prev_log_index':'%zu', 'prev_log_term':'%zu', 'leader_commit':'%zu', "
-                "'log[term':'%zu', 'cmd':'%s']}\n", r.ae().leader_term,
-                r.ae().leader_id.c_str(), r.ae().prev_log_index, r.ae().prev_log_term,
-                r.ae().leader_commit, r.ae().log_entry.leader_term, r.ae().log_entry.cmd.c_str());
+                "'log[term':'%zu', 'cmd':'%s']}\n", ae().leader_term,
+                ae().leader_id.c_str(), ae().prev_log_index, ae().prev_log_term,
+                ae().leader_commit, ae().log_entry.leader_term, ae().log_entry.cmd.c_str());
         break;
     case HB_RPC:
         printf("{'type':'HB_RPC', 'leader_term':'%zu', 'leader_id':'%s', "
                 "'prev_log_index':'%zu', 'prev_log_term':'%zu', 'leader_commit':'%zu'}\n",
-                r.ae().leader_term, r.ae().leader_id.c_str(), r.ae().prev_log_index,
-                r.ae().prev_log_term, r.ae().leader_commit);
+                ae().leader_term, ae().leader_id.c_str(), ae().prev_log_index,
+                ae().prev_log_term, ae().leader_commit);
         break;
     case RV_REPLY:
         printf("{'type':'RV_REPLY', 'term':'%zu', 'voted':'%s'}\n",
-                r.reply().term, r.reply().success ? "true" : "false");
+                reply().term, reply().success ? "true" : "false");
         break;
     case AE_REPLY:
         printf("{'type':'AE_REPLY', 'term':'%zu', 'success':'%s'}\n",
-                r.reply().term, r.reply().success ? "true" : "false");
+                reply().term, reply().success ? "true" : "false");
         break;
     }
+}
+
 }

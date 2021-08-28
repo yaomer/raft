@@ -60,19 +60,21 @@ struct Reply {
     bool success;
 };
 
-struct rpc {
+class rpc {
+public:
     using rpcmsg = std::variant<AppendEntry, RequestVote, Reply>;
     rpc() : type(NONE) {  }
+    int gettype() { return type; }
+    void parse(const char *s, const char *es);
     AppendEntry& ae() { return std::get<AppendEntry>(msg); }
     RequestVote& rv() { return std::get<RequestVote>(msg); }
     Reply& reply() { return std::get<Reply>(msg); }
+    size_t getterm();
+    void print();
+private:
     int type;
     rpcmsg msg;
 };
-
-void parserpc(rpc& r, const char *s, const char *es);
-size_t getterm(rpc& r);
-void printrpc(rpc& r);
 
 }
 

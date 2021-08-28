@@ -93,6 +93,7 @@ public:
 private:
     bool logUpToDate(size_t, size_t);
     void appendLogEntry(size_t term, const std::string& cmd);
+    void sendLogEntry(const angel::connection_ptr& conn, size_t next_index);
     void updateCommitIndex(AppendEntry& ae);
     void updateLastRecvHeartbeatTime()
     {

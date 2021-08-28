@@ -64,17 +64,9 @@ void ServerNode::sendLogEntry()
 {
     for (auto& [name, serv] : server_entries) {
         if (serv->client->is_connected()) {
-            auto& next_log = log_entries[serv->next_index];
-            size_t prev_log_index = 0;
-            size_t prev_log_term = 0;
-            if (serv->next_index > 0) {
-                prev_log_index = serv->next_index - 1;
-                prev_log_term = log_entries[prev_log_index].leader_term;
+            for (size_t idx = serv->next_index; idx < log_entries.size(); idx++) {
+                sendLogEntry(serv->client->conn(), idx);
             }
-            // 这里暂时不考虑cmd中包含二进制数据，假定都是ASCII字符
-            serv->client->conn()->format_send("AE_RPC,%zu,%s,%zu,%zu,%zu,%zu,%s\r\n",
-                    current_term, run_id.c_str(), prev_log_index, prev_log_term,
-                    commit_index, next_log.leader_term, next_log.cmd.c_str());
             for (size_t n = commit_index; n < serv->match_index; n++) {
                 if (log_entries[n].leader_term == current_term) {
                     commit_index = n;
@@ -83,6 +75,20 @@ void ServerNode::sendLogEntry()
             }
         }
     }
+}
+
+void ServerNode::sendLogEntry(const angel::connection_ptr& conn, size_t next_index)
+{
+    auto& next_log = log_entries[next_index];
+    size_t prev_log_index = 0, prev_log_term = 0;
+    if (next_index > 0) {
+        prev_log_index = next_index - 1;
+        prev_log_term = log_entries[prev_log_index].leader_term;
+    }
+    // 这里暂时不考虑cmd中包含二进制数据，假定都是ASCII字符
+    conn->format_send("AE_RPC,%zu,%s,%zu,%zu,%zu,%zu,%s\r\n",
+            current_term, run_id.c_str(), prev_log_index, prev_log_term,
+            commit_index, next_log.leader_term, next_log.cmd.c_str());
 }
 
 void ServerNode::processRpcFromServer(const angel::connection_ptr& conn,
@@ -172,18 +178,9 @@ void ServerNode::sendLogEntryFail(const angel::connection_ptr& conn)
 {
     auto it = server_entries.find(conn->get_peer_addr().to_host());
     assert(it != server_entries.end());
-    assert(it->second->next_index-- > 0);
+    if (it->second->next_index > 0) it->second->next_index--;
     for (size_t idx = it->second->next_index; idx < log_entries.size(); idx++) {
-        auto& next_log = log_entries[idx];
-        size_t prev_log_index = 0;
-        size_t prev_log_term = 0;
-        if (idx > 0) {
-            prev_log_index = idx - 1;
-            prev_log_term = log_entries[prev_log_index].leader_term;
-        }
-        it->second->client->conn()->format_send("AE_RPC,%zu,%s,%zu,%zu,%zu,%zu,%s\r\n",
-                current_term, run_id.c_str(), prev_log_index, prev_log_term,
-                commit_index, next_log.leader_term, next_log.cmd.c_str());
+        sendLogEntry(it->second->client->conn(), idx);
     }
 }
 
@@ -235,17 +232,26 @@ void ServerNode::recvLogEntryFromLeader(const angel::connection_ptr& conn, Appen
 {
     if (ae.prev_log_term > 0) { // 进行一致性检查
         // 如果上一条日志不匹配，就返回false
-        if (log_entries[ae.prev_log_index].leader_term != ae.prev_log_term) {
+        if (ae.prev_log_index >= log_entries.size() ||
+                log_entries[ae.prev_log_index].leader_term != ae.prev_log_term) {
             conn->format_send("AE_REPLY,%zu,%d\r\n", current_term, 0);
             return;
         }
         // 如果一条已经存在的日志与新的日志冲突（index相同但是term不同），
         // 就删除已经存在的日志和它之后所有的日志
         int new_index = ae.prev_log_index + 1;
-        if (log_entries.size() > new_index
-                && log_entries[new_index].leader_term != ae.log_entry.leader_term) {
-            removeLogEntry(new_index);
+        if (new_index < log_entries.size()) {
+            if (log_entries[new_index].leader_term != ae.log_entry.leader_term) {
+                removeLogEntry(new_index);
+            } else { // 该条日志已存在
+                return;
+            }
         }
+    } else {
+        // 第一条日志是否已存在
+        assert(ae.prev_log_index == 0);
+        if (log_entries.size() > 0 && log_entries[0].leader_term == ae.log_entry.leader_term)
+            return;
     }
     // 追加新日志
     appendLogEntry(ae.log_entry.leader_term, ae.log_entry.cmd);
@@ -277,8 +283,7 @@ void ServerNode::votedForCandidate(const angel::connection_ptr& conn, RequestVot
 // 候选人的日志至少和自己的一样新
 bool ServerNode::logUpToDate(size_t last_log_index, size_t last_log_term)
 {
-    if (last_log_term == 0) return true;
-    assert(log_entries.size() > 0);
+    if (last_log_term == 0 || log_entries.empty()) return true;
     auto& last_log = log_entries.back();
     if (last_log_term == last_log.leader_term) {
         return last_log_index >= log_entries.size() - 1;
@@ -324,9 +329,7 @@ void ServerNode::sendHeartBeat()
         if (serv.second->client->is_connected()) {
             auto& conn = serv.second->client->conn();
             if (last_log_index <= 1) {
-                // 没有日志或只有一条日志，此时让对方忽略一致性检查
-                conn->format_send("HB_RPC,%zu,%s,0,0,%zu\r\n",
-                        current_term, run_id.c_str(), commit_index);
+                conn->format_send("HB_RPC,%zu,%s,0,0,%zu\r\n", current_term, run_id.c_str(), commit_index);
             } else {
                 size_t prev_log_index = last_log_index - 2;
                 size_t prev_log_term = log_entries[prev_log_index].leader_term;

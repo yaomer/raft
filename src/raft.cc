@@ -308,7 +308,7 @@ void ServerNode::serverCron()
 {
     if (role == FOLLOWER) {
         auto now = angel::util::get_cur_time_ms();
-        if (now - last_recv_heartbeat_time > rconf.election_timeout) {
+        if (now - last_recv_heartbeat_time > rconf.election_timeout.base + rconf.election_timeout.range) {
             startLeaderElection();
         }
     }
@@ -359,8 +359,7 @@ void ServerNode::startLeaderElection()
 void ServerNode::setElectionTimer()
 {
     ::srand(::time(nullptr));
-    // ~(150 ~ 300)ms
-    time_t timeout = rconf.election_timeout + (::rand() % 151 + 150);
+    time_t timeout = rconf.election_timeout.base + ::rand() % rconf.election_timeout.range;
     election_timer_id = loop->run_after(timeout, [this]{
             this->startLeaderElection();
             });

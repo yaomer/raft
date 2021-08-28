@@ -48,7 +48,8 @@ void readConf(const std::string& confile)
             node.port = stoi(param[2]);
             rconf.nodes.emplace_back(node);
         } else if (param[0].compare("election_timeout") == 0) {
-            rconf.election_timeout = stoi(param[1]);
+            rconf.election_timeout.base = stoi(param[1]);
+            rconf.election_timeout.range = stoi(param[2]);
         } else if (param[0].compare("heartbeat_period") == 0) {
             rconf.heartbeat_period = stoi(param[1]);
         } else if (param[0].compare("server_cron_period") == 0) {

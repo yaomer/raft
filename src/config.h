@@ -10,11 +10,17 @@ struct node_info {
     int port;
 };
 
+struct election_timeout_info {
+    // election_timeout = base + rand() % range;
+    int base = 150;
+    int range = 150;
+};
+
 struct rconf {
     std::vector<node_info> nodes;
-    size_t election_timeout = 3000;
-    size_t heartbeat_period = 1000;
-    size_t server_cron_period = 100;
+    election_timeout_info election_timeout;
+    int heartbeat_period = 100;
+    int server_cron_period = 100;
     std::string confile = "../raft.conf";
     std::string logfile;
 };

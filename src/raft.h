@@ -81,14 +81,6 @@ public:
     void requestServersToVote();
     void becomeNewLeader();
 
-    // nodes = 2, half = 2
-    // nodes = 3, half = 2
-    // nodes = 4, half = 3
-    // nodes = 5, half = 3
-    size_t getHalf() { return (server_entries.size() + 1) / 2 + 1; }
-
-    static std::string generateRunid();
-
     void info(const char *fmt, ...);
 private:
     bool logUpToDate(size_t, size_t);
@@ -103,6 +95,16 @@ private:
     void removeLogEntry(size_t from);
     void clearCandidateInfo();
     void clearLeaderInfo();
+
+    std::string generateRunid();
+
+    // nodes = 2, half = 2
+    // nodes = 3, half = 2
+    // nodes = 4, half = 3
+    // nodes = 5, half = 3
+    size_t getHalf() { return (server_entries.size() + 1) / 2 + 1; }
+
+    void updateRecentLeader(const std::string& leader_id);
 
     // 在所有服务器上持久存在的
     std::string run_id;         // 服务器的运行时id（分布式唯一id）
@@ -133,6 +135,8 @@ private:
     // 最后一次收到心跳包的时间戳(ms)
     int64_t last_recv_heartbeat_time = angel::util::get_cur_time_ms();
     int log_fd = -1;
+    // 用于为客户端重定向到领导人
+    std::string recent_leader;
 };
 
 }

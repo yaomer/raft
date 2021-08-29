@@ -45,12 +45,16 @@ void ServerNode::process(const angel::connection_ptr& conn,
         if (crlf < 0) break;
         if (buf.starts_with("<user>")) { // 客户端的请求
             if (role == LEADER) {
-                appendLogEntry(current_term, std::string(buf.peek() + 6, crlf - 6));
-                clients.emplace(log_entries.size() - 1, conn->id());
-                sendLogEntry();
-            } else {
-                // 重定向
-                conn->send(">I'm not a leader<");
+                std::string cmd(buf.peek() + 6, crlf - 6);
+                if (!cmd.empty()) {
+                    appendLogEntry(current_term, cmd);
+                    clients.emplace(log_entries.size() - 1, conn->id());
+                    sendLogEntry();
+                } else {
+                    info("recvd empty cmd");
+                }
+            } else { // 重定向
+                conn->format_send("<host>%s\r\n", recent_leader.c_str());
             }
         } else { // 内部通信
             r.parse(buf.peek(), buf.peek() + crlf);
@@ -222,6 +226,7 @@ void ServerNode::processRpcAsFollower(const angel::connection_ptr& conn, rpc& r)
     case AE_RPC: recvLogEntryFromLeader(conn, r.ae()); break;
     case RV_RPC: votedForCandidate(conn, r.rv()); break;
     case HB_RPC:
+        updateRecentLeader(r.ae().leader_id);
         updateLastRecvHeartbeatTime();
         updateCommitIndex(r.ae());
         break;
@@ -432,7 +437,16 @@ std::string ServerNode::generateRunid()
     uuid_t uu;
     uuid_generate(uu);
     uuid_unparse_lower(uu, out);
-    return out;
+    std::string id(out);
+    id.append("<").append(server.listen_addr().to_host()).append(">");
+    return id;
+}
+
+void ServerNode::updateRecentLeader(const std::string& leader_id)
+{
+    // uuid<host>
+    int start = leader_id.rfind("<") + 1;
+    recent_leader.assign(leader_id.begin() + start, leader_id.end() - 1);
 }
 
 void ServerEntry::start(ServerNode *self)
@@ -475,6 +489,6 @@ int main(int argc, char *argv[])
         printf("usage: serv [listen port]\n");
         return 1;
     }
-    ServerNode node(&loop, angel::inet_addr(atoi(argv[1])));
+    ServerNode node(&loop, angel::inet_addr("127.0.0.1", atoi(argv[1])));
     loop.run();
 }

@@ -1,4 +1,5 @@
 #ifndef _RAFT_SRC_CONFIG_H
+#define _RAFT_SRC_CONFIG_H
 
 #include <vector>
 #include <string>

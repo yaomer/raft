@@ -17,8 +17,6 @@ struct LogEntry {
     std::string cmd;    // 要执行的命令
 };
 
-using LogEntryList = std::vector<LogEntry>;
-
 enum RpcType {
     NONE,
     AE_RPC,

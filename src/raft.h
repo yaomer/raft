@@ -111,7 +111,7 @@ private:
     size_t current_term = 0;    // 服务器的当前任期，单调递增
     std::string voted_for;      // 当前任期内收到选票的候选人id（投给了谁）
     size_t votes;               // 当前任期内收到了多少票数
-    LogEntryList log_entries;   // 要执行的日志条目
+    std::vector<LogEntry> log_entries;   // 要执行的日志条目
     ////////////////////////////////////////////////////
     // 在所有服务器上不稳定存在的
     // 如果一条日志被复制到了大多数服务器上，就称为‘可提交的‘

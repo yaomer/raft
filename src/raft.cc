@@ -50,8 +50,6 @@ void ServerNode::process(const angel::connection_ptr& conn,
                     appendLogEntry(current_term, cmd);
                     clients.emplace(log_entries.size() - 1, conn->id());
                     sendLogEntry();
-                } else {
-                    info("recvd empty cmd");
                 }
             } else { // 重定向
                 conn->format_send("<host>%s\r\n", recent_leader.c_str());
@@ -279,16 +277,18 @@ void ServerNode::votedForCandidate(const angel::connection_ptr& conn, RequestVot
             voted_for = rv.candidate_id;
             conn->format_send("RV_REPLY,%zu,1\r\n", current_term);
             info("voted for %s", voted_for.c_str());
+            return;
         }
-    } else {
-        conn->format_send("RV_REPLY,%zu,0\r\n", current_term);
     }
+    conn->format_send("RV_REPLY,%zu,0\r\n", current_term);
 }
 
 // 候选人的日志至少和自己的一样新
 bool ServerNode::logUpToDate(size_t last_log_index, size_t last_log_term)
 {
-    if (last_log_term == 0 || log_entries.empty()) return true;
+    // 候选人日志为空
+    if (last_log_term == 0) return log_entries.empty();
+    if (log_entries.empty()) return true;
     auto& last_log = log_entries.back();
     if (last_log_term == last_log.leader_term) {
         return last_log_index >= log_entries.size() - 1;

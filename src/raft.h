@@ -10,6 +10,7 @@
 #include <angel/client.h>
 
 #include "rpc.h"
+#include "kv.h"
 
 namespace raft {
 
@@ -137,6 +138,8 @@ private:
     int log_fd = -1;
     // 用于为客户端重定向到领导人
     std::string recent_leader;
+    ////////////////////////////////////////////////////
+    kv kv;
 };
 
 }

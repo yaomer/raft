@@ -134,6 +134,7 @@ void ServerNode::applyLogEntry()
 {
     if (commit_index > last_applied) {
         auto& apply_log = log_entries[last_applied];
+        kv.execute(apply_log.cmd);
         info("log[%zu](%zu, %s) is applied to the state machine",
                 last_applied, apply_log.leader_term, apply_log.cmd.c_str());
         if (role == LEADER) { // 回复客户端
@@ -141,7 +142,7 @@ void ServerNode::applyLogEntry()
             assert(it != clients.end());
             auto conn = server.get_connection(it->second);
             if (conn->is_connected())
-                conn->format_send("<reply>%s", apply_log.cmd.c_str());
+                conn->send(kv.get_reply());
             clients.erase(it);
         }
         ++last_applied;

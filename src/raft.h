@@ -99,11 +99,7 @@ private:
 
     std::string generateRunid();
 
-    // nodes = 2, half = 2
-    // nodes = 3, half = 2
-    // nodes = 4, half = 3
-    // nodes = 5, half = 3
-    size_t getHalf() { return (server_entries.size() + 1) / 2 + 1; }
+    size_t getMajority() { return (server_entries.size() + 1) / 2 + 1; }
 
     void updateRecentLeader(const std::string& leader_id);
 

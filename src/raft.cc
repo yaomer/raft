@@ -69,12 +69,6 @@ void ServerNode::sendLogEntry()
             for (size_t idx = serv->next_index; idx < log_entries.size(); idx++) {
                 sendLogEntry(serv->client->conn(), idx);
             }
-            for (size_t n = commit_index; n < serv->match_index; n++) {
-                if (log_entries[n].leader_term == current_term) {
-                    commit_index = n;
-                    break;
-                }
-            }
         }
     }
 }
@@ -166,14 +160,19 @@ void ServerNode::sendLogEntrySuccessfully(const angel::connection_ptr& conn)
     assert(it != server_entries.end());
     it->second->next_index++;
     it->second->match_index = it->second->next_index;
+    // If there exists an N such that N > commitIndex,
+    // a majority of matchIndex[i] ≥ N, and log[N].term == currentTerm:
+    // set commitIndex = N
     size_t commits = 1;
+    size_t n = commit_index;
     for (auto& serv : server_entries) {
-        if (serv.second->match_index == commit_index + 1)
+        if (n < serv.second->match_index) {
             commits++;
+        }
     }
     // 如果一条日志复制到了大多数机器上，则称为可提交的
-    if (commits >= getHalf()) {
-        commit_index++;
+    if (commits >= getMajority() && log_entries[n].leader_term == current_term) {
+        commit_index = n + 1;
     }
 }
 
@@ -201,7 +200,7 @@ void ServerNode::processRpcAsCandidate(const angel::connection_ptr& conn, rpc& r
         break;
     case RV_REPLY:
         // 统计票数，如果获得大多数服务器的投票，则当选为新的领导人
-        if (r.reply().success && ++votes >= getHalf()) {
+        if (r.reply().success && ++votes >= getMajority()) {
             becomeNewLeader();
         }
         break;

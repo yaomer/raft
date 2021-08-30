@@ -87,10 +87,11 @@ void ServerNode::sendLogEntry(const angel::connection_ptr& conn, size_t next_ind
         prev_log_index = next_index - 1;
         prev_log_term = log_entries[prev_log_index].leader_term;
     }
-    // 这里暂时不考虑cmd中包含二进制数据，假定都是ASCII字符
-    conn->format_send("AE_RPC,%zu,%s,%zu,%zu,%zu,%zu,%s\r\n",
+    conn->format_send("AE_RPC,%zu,%s,%zu,%zu,%zu,%zu,",
             current_term, run_id.c_str(), prev_log_index, prev_log_term,
-            commit_index, next_log.leader_term, next_log.cmd.c_str());
+            commit_index, next_log.leader_term);
+    conn->send(next_log.cmd);
+    conn->send("\r\n");
 }
 
 void ServerNode::processRpcFromServer(const angel::connection_ptr& conn,
@@ -413,8 +414,8 @@ void ServerNode::removeLogEntry(size_t from)
 {
     off_t remove_bytes = 0;
     while (from < log_entries.size()) {
-        auto& end = log_entries.back();
-        remove_bytes += sizeof(end.leader_term) + end.cmd.size() + 2;
+        auto& last = log_entries.back();
+        remove_bytes += sizeof(last.leader_term) + last.cmd.size() + 2;
         log_entries.pop_back();
     }
     struct stat st;

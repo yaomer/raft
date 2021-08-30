@@ -53,9 +53,16 @@ public:
                 });
         server.start();
     }
+    ~ServerNode() { saveState(); }
 
     void initServer();
     void serverCron();
+
+    ServerEntry *getServerEntry(const std::string& host)
+    {
+        auto it = server_entries.find(host);
+        return it != server_entries.end() ? it->second.get() : nullptr;
+    }
 
     void process(const angel::connection_ptr& conn, angel::buffer& buf);
     void processRpcFromServer(const angel::connection_ptr& conn, angel::buffer& buf);
@@ -82,11 +89,13 @@ public:
     void requestServersToVote();
     void becomeNewLeader();
 
+    off_t getFileSize(int fd);
+
     void info(const char *fmt, ...);
 private:
     bool logUpToDate(size_t, size_t);
     void appendLogEntry(size_t term, const std::string& cmd);
-    void sendLogEntry(const angel::connection_ptr& conn, size_t next_index);
+    void sendLogEntry(ServerEntry *serv);
     void updateCommitIndex(AppendEntry& ae);
     void updateLastRecvHeartbeatTime()
     {
@@ -96,6 +105,11 @@ private:
     void removeLogEntry(size_t from);
     void clearCandidateInfo();
     void clearLeaderInfo();
+    void clearFollowerInfo();
+
+    void saveState();
+    void loadState();
+    void loadLog();
 
     std::string generateRunid();
 
@@ -136,6 +150,8 @@ private:
     std::string recent_leader;
     ////////////////////////////////////////////////////
     kv kv;
+
+    friend ServerEntry;
 };
 
 }

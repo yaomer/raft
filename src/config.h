@@ -24,6 +24,7 @@ struct rconf {
     int server_cron_period = 100;
     std::string confile = "../raft.conf";
     std::string logfile;
+    std::string statefile;
 };
 
 extern struct rconf rconf;

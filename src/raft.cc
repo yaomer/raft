@@ -11,7 +11,6 @@
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <uuid/uuid.h>
 #include <stdarg.h>
 
 using namespace raft;
@@ -32,8 +31,12 @@ void ServerNode::initServer()
     static char pid[64] = { 0 };
     snprintf(pid, sizeof(pid), "rlog/%s.log", run_id.c_str());
     rconf.logfile = pid;
+    snprintf(pid, sizeof(pid), "rlog/%s.state", run_id.c_str());
+    rconf.statefile = pid;
     loop->run_every(rconf.server_cron_period, [this]{ this->serverCron(); });
     log_fd = open(rconf.logfile.c_str(), O_RDWR | O_APPEND | O_CREAT, 0644);
+    loadState();
+    loadLog();
 }
 
 void ServerNode::process(const angel::connection_ptr& conn,
@@ -64,28 +67,29 @@ void ServerNode::process(const angel::connection_ptr& conn,
 
 void ServerNode::sendLogEntry()
 {
-    for (auto& [name, serv] : server_entries) {
-        if (serv->client->is_connected()) {
-            for (size_t idx = serv->next_index; idx < log_entries.size(); idx++) {
-                sendLogEntry(serv->client->conn(), idx);
-            }
+    for (auto& serv : server_entries) {
+        if (serv.second->client->is_connected()) {
+            sendLogEntry(serv.second.get());
         }
     }
 }
 
-void ServerNode::sendLogEntry(const angel::connection_ptr& conn, size_t next_index)
+void ServerNode::sendLogEntry(ServerEntry *serv)
 {
-    auto& next_log = log_entries[next_index];
-    size_t prev_log_index = 0, prev_log_term = 0;
-    if (next_index > 0) {
-        prev_log_index = next_index - 1;
-        prev_log_term = log_entries[prev_log_index].leader_term;
+    for (size_t idx = serv->next_index; idx < log_entries.size(); idx++) {
+        auto& next_log = log_entries[idx];
+        size_t prev_log_index = 0, prev_log_term = 0;
+        if (idx > 0) {
+            prev_log_index = idx - 1;
+            prev_log_term = log_entries[prev_log_index].leader_term;
+        }
+        auto& conn = serv->client->conn();
+        conn->format_send("AE_RPC,%zu,%s,%zu,%zu,%zu,%zu,",
+                current_term, run_id.c_str(), prev_log_index, prev_log_term,
+                commit_index, next_log.leader_term);
+        conn->send(next_log.cmd);
+        conn->send("\r\n");
     }
-    conn->format_send("AE_RPC,%zu,%s,%zu,%zu,%zu,%zu,",
-            current_term, run_id.c_str(), prev_log_index, prev_log_term,
-            commit_index, next_log.leader_term);
-    conn->send(next_log.cmd);
-    conn->send("\r\n");
 }
 
 void ServerNode::processRpcFromServer(const angel::connection_ptr& conn,
@@ -111,10 +115,11 @@ void ServerNode::processrpc(const angel::connection_ptr& conn, rpc& r)
     }
     if (term > current_term) {
         current_term = term;
-        if (role == LEADER) clearLeaderInfo();
-        else if (role == CANDIDATE) clearCandidateInfo();
-        else voted_for.clear();
-        if (role != FOLLOWER) info("convert to follower");
+        switch (role) {
+        case LEADER: clearLeaderInfo(); break;
+        case CANDIDATE: clearCandidateInfo(); break;
+        case FOLLOWER: clearFollowerInfo(); break;
+        }
         role = FOLLOWER;
     }
     switch (role) {
@@ -127,18 +132,21 @@ void ServerNode::processrpc(const angel::connection_ptr& conn, rpc& r)
 
 void ServerNode::applyLogEntry()
 {
-    if (commit_index > last_applied) {
+    while (last_applied < commit_index) {
+        // 此时[last_applied, commit_index)之间的所有日志条目都可以被应用到状态机
         auto& apply_log = log_entries[last_applied];
-        kv.execute(apply_log.cmd);
-        info("log[%zu](%zu, %s) is applied to the state machine",
-                last_applied, apply_log.leader_term, apply_log.cmd.c_str());
+        if (apply_log.cmd != "")
+            kv.execute(apply_log.cmd);
+        info("log[%zu](%zu) is applied to the state machine",
+                last_applied, apply_log.leader_term);
         if (role == LEADER) { // 回复客户端
             auto it = clients.find(last_applied);
-            assert(it != clients.end());
-            auto conn = server.get_connection(it->second);
-            if (conn->is_connected())
-                conn->send(kv.get_reply());
-            clients.erase(it);
+            if (it != clients.end()) {
+                auto conn = server.get_connection(it->second);
+                if (conn->is_connected())
+                    conn->send(kv.get_reply());
+                clients.erase(it);
+            }
         }
         ++last_applied;
     }
@@ -156,23 +164,29 @@ void ServerNode::processRpcAsLeader(const angel::connection_ptr& conn, rpc& r)
 
 void ServerNode::sendLogEntrySuccessfully(const angel::connection_ptr& conn)
 {
-    auto it = server_entries.find(conn->get_peer_addr().to_host());
-    assert(it != server_entries.end());
-    it->second->next_index++;
-    it->second->match_index = it->second->next_index;
+    auto serv = getServerEntry(conn->get_peer_addr().to_host());
+    assert(serv);
+    serv->next_index++;
+    serv->match_index = serv->next_index;
     // If there exists an N such that N > commitIndex,
     // a majority of matchIndex[i] ≥ N, and log[N].term == currentTerm:
     // set commitIndex = N
-    size_t commits = 1;
-    size_t n = commit_index;
+    //
+    // Raft从来不会通过计算复制的数目来提交之前任期的日志条目
+    // 只有领导人当前任期的日志条目才能通过计算复制数目来进行提交
+    // 否则可能会出现：一条复制到了大多数服务器上的日志(还没提交)被新任领导人覆盖掉
+    //
+    std::unordered_map<size_t, int> commit_map;
     for (auto& serv : server_entries) {
-        if (n < serv.second->match_index) {
-            commits++;
-        }
+        commit_map[serv.second->match_index]++;
     }
-    // 如果一条日志复制到了大多数机器上，则称为可提交的
-    if (commits >= getMajority() && log_entries[n].leader_term == current_term) {
-        commit_index = n + 1;
+    for (auto& [n, commits] : commit_map) {
+        if (n <= commit_index) continue;
+        // 如果一条日志复制到了大多数机器上，则称为可提交的
+        if (commits >= getMajority() - 1 && log_entries[n - 1].leader_term == current_term) {
+            commit_index = n;
+            break;
+        }
     }
 }
 
@@ -182,9 +196,7 @@ void ServerNode::sendLogEntryFail(const angel::connection_ptr& conn)
     auto it = server_entries.find(conn->get_peer_addr().to_host());
     assert(it != server_entries.end());
     if (it->second->next_index > 0) it->second->next_index--;
-    for (size_t idx = it->second->next_index; idx < log_entries.size(); idx++) {
-        sendLogEntry(it->second->client->conn(), idx);
-    }
+    sendLogEntry(it->second.get());
 }
 
 void ServerNode::processRpcAsCandidate(const angel::connection_ptr& conn, rpc& r)
@@ -217,6 +229,9 @@ void ServerNode::becomeNewLeader()
         serv.second->next_index = log_entries.size();
         serv.second->match_index = 0;
     }
+    // 提交一条空操作日志
+    appendLogEntry(current_term, "");
+    sendLogEntry();
 }
 
 void ServerNode::processRpcAsFollower(const angel::connection_ptr& conn, rpc& r)
@@ -278,6 +293,7 @@ void ServerNode::votedForCandidate(const angel::connection_ptr& conn, RequestVot
             voted_for = rv.candidate_id;
             conn->format_send("RV_REPLY,%zu,1\r\n", current_term);
             info("voted for %s", voted_for.c_str());
+            saveState();
             return;
         }
     }
@@ -302,12 +318,20 @@ void ServerNode::clearCandidateInfo()
 {
     cancelElectionTimer();
     voted_for.clear();
-    votes = 0;
+    saveState();
 }
 
 void ServerNode::clearLeaderInfo()
 {
     cancelHeartBeatTimer();
+    voted_for.clear();
+    saveState();
+}
+
+void ServerNode::clearFollowerInfo()
+{
+    voted_for.clear();
+    saveState();
 }
 
 void ServerNode::serverCron()
@@ -356,10 +380,12 @@ void ServerNode::startLeaderElection()
 {
     role = CANDIDATE;
     ++current_term;
+    voted_for = run_id;
     votes = 1; // 先给自己投上一票
     info("start %zuth leader election", current_term);
     setElectionTimer();
     requestServersToVote();
+    saveState();
 }
 
 void ServerNode::setElectionTimer()
@@ -394,19 +420,71 @@ void ServerNode::requestServersToVote()
     }
 }
 
+// [term][cmd-size][cmd]
 void ServerNode::appendLogEntry(size_t term, const std::string& cmd)
 {
     struct iovec iov[3];
     iov[0].iov_base = &term;
     iov[0].iov_len = sizeof(term);
-    iov[1].iov_base = const_cast<char*>(&cmd[0]);
-    iov[1].iov_len = cmd.size();
-    iov[2].iov_base = const_cast<char*>("\r\n");
-    iov[2].iov_len = 2;
+    size_t size = cmd.size();
+    iov[1].iov_base = &size;
+    iov[1].iov_len = sizeof(size);
+    iov[2].iov_base = const_cast<char*>(cmd.data());
+    iov[2].iov_len = size;
     log_entries.emplace_back(term, cmd);
     writev(log_fd, iov, 3);
     fsync(log_fd);
-    info("append new log[%zu](%zu, %s)", log_entries.size() - 1, term, cmd.c_str());
+    info("append new log[%zu](%zu)", log_entries.size() - 1, term);
+}
+
+void ServerNode::loadLog()
+{
+    auto filesize = getFileSize(log_fd);
+    void *start = mmap(nullptr, filesize, PROT_READ, MAP_SHARED, log_fd, 0);
+    if (start == MAP_FAILED) return;
+    char *buf = reinterpret_cast<char*>(start);
+    char *end = buf + filesize;
+    while (buf < end) {
+        size_t term = *reinterpret_cast<size_t*>(buf);
+        buf += sizeof(term);
+        size_t len = *reinterpret_cast<size_t*>(buf);
+        buf += sizeof(len);
+        std::string cmd(buf, len);
+        buf += len;
+        log_entries.emplace_back(term, cmd);
+        info("load log[%zu](%zu)", log_entries.size() - 1, term);
+    }
+    munmap(start, filesize);
+}
+
+// 持久化current_term、voted_for以便节点重启后能够恢复之前的正常状态
+void ServerNode::saveState()
+{
+    int fd = open(rconf.statefile.c_str(), O_RDWR | O_TRUNC | O_CREAT, 0644);
+    struct iovec iov[5];
+    iov[0].iov_base = &current_term;
+    iov[0].iov_len = sizeof(current_term);
+    size_t size = voted_for.size();
+    iov[1].iov_base = &size;
+    iov[1].iov_len = sizeof(size);
+    iov[2].iov_base = const_cast<char*>(voted_for.data());
+    iov[2].iov_len = size;
+    writev(fd, iov, 3);
+    fsync(fd);
+    close(fd);
+}
+
+void ServerNode::loadState()
+{
+    int fd = open(rconf.statefile.c_str(), O_RDONLY);
+    if (fd > 0) {
+        read(fd, &current_term, sizeof(current_term));
+        size_t len;
+        read(fd, &len, sizeof(len));
+        voted_for.resize(len);
+        read(fd, const_cast<char*>(voted_for.data()), len);
+    }
+    close(fd);
 }
 
 void ServerNode::removeLogEntry(size_t from)
@@ -414,46 +492,49 @@ void ServerNode::removeLogEntry(size_t from)
     off_t remove_bytes = 0;
     while (from < log_entries.size()) {
         auto& last = log_entries.back();
-        remove_bytes += sizeof(last.leader_term) + last.cmd.size() + 2;
+        remove_bytes += last.cmd.size() + sizeof(size_t) * 2;
         log_entries.pop_back();
     }
-    struct stat st;
-    fstat(log_fd, &st);
-    off_t remain_bytes = st.st_size - remove_bytes;
+    off_t filesize = getFileSize(log_fd);
+    off_t remain_bytes = filesize - remove_bytes;
     char tmpfile[32] = "tmp.XXXXXX";
     mktemp(tmpfile);
     int tmpfd = open(tmpfile, O_RDWR | O_APPEND | O_CREAT, 0644);
-    char *start = static_cast<char*>(
-            mmap(nullptr, remain_bytes, PROT_READ, MAP_SHARED, log_fd, 0));
+    void *start = mmap(nullptr, remain_bytes, PROT_READ, MAP_SHARED, log_fd, 0);
     write(tmpfd, start, remain_bytes);
     fsync(tmpfd);
     close(tmpfd);
-    munmap(start, st.st_size);
+    munmap(start, remain_bytes);
     rename(tmpfile, rconf.logfile.c_str());
 }
 
 std::string ServerNode::generateRunid()
 {
-    char out[33] = { 0 };
-    uuid_t uu;
-    uuid_generate(uu);
-    uuid_unparse_lower(uu, out);
-    std::string id(out);
-    id.append("<").append(server.listen_addr().to_host()).append(">");
-    return id;
+    return server.listen_addr().to_host();
 }
 
 void ServerNode::updateRecentLeader(const std::string& leader_id)
 {
-    // uuid<host>
-    int start = leader_id.rfind("<") + 1;
-    recent_leader.assign(leader_id.begin() + start, leader_id.end() - 1);
+    recent_leader = leader_id;
+}
+
+off_t ServerNode::getFileSize(int fd)
+{
+    struct stat st;
+    fstat(fd, &st);
+    return st.st_size;
 }
 
 void ServerEntry::start(ServerNode *self)
 {
     client->set_connection_handler([self](const angel::connection_ptr& conn){
             self->info("### connect with server %s", conn->get_peer_addr().to_host());
+            // 尝试补发缺失的日志
+            if (self->role == LEADER) {
+                auto serv = self->getServerEntry(conn->get_peer_addr().to_host());
+                assert(serv);
+                self->sendLogEntry(serv);
+            }
             });
     client->set_message_handler([self](const angel::connection_ptr& conn, angel::buffer& buf){
             self->processRpcFromServer(conn, buf);

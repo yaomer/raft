@@ -89,7 +89,8 @@ public:
     void requestServersToVote();
     void becomeNewLeader();
 
-    off_t getFileSize(int fd);
+    static off_t getFileSize(int fd);
+    static std::string getTmpFile();
 
     void info(const char *fmt, ...);
 private:
@@ -110,6 +111,9 @@ private:
     void saveState();
     void loadState();
     void loadLog();
+
+    void setPaths();
+    void connectNodes();
 
     std::string generateRunid();
 

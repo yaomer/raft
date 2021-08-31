@@ -20,6 +20,16 @@ void ServerNode::initServer()
     run_id = generateRunid();
     info("my runid is %s", run_id.c_str());
     readConf(rconf.confile);
+    connectNodes();
+    setPaths();
+    loop->run_every(rconf.server_cron_period, [this]{ this->serverCron(); });
+    log_fd = open(rconf.logfile.c_str(), O_RDWR | O_APPEND | O_CREAT, 0644);
+    loadState();
+    loadLog();
+}
+
+void ServerNode::connectNodes()
+{
     for (auto& node : rconf.nodes) {
         if (node.port == server.listen_addr().to_host_port())
             continue;
@@ -27,16 +37,16 @@ void ServerNode::initServer()
         se->start(this);
         server_entries.emplace(node.ip + ":" + std::to_string(node.port), se);
     }
+}
+
+void ServerNode::setPaths()
+{
     mkdir("rlog", 0777);
     static char pid[64] = { 0 };
     snprintf(pid, sizeof(pid), "rlog/%s.log", run_id.c_str());
     rconf.logfile = pid;
     snprintf(pid, sizeof(pid), "rlog/%s.state", run_id.c_str());
     rconf.statefile = pid;
-    loop->run_every(rconf.server_cron_period, [this]{ this->serverCron(); });
-    log_fd = open(rconf.logfile.c_str(), O_RDWR | O_APPEND | O_CREAT, 0644);
-    loadState();
-    loadLog();
 }
 
 void ServerNode::process(const angel::connection_ptr& conn,
@@ -461,7 +471,7 @@ void ServerNode::loadLog()
 void ServerNode::saveState()
 {
     int fd = open(rconf.statefile.c_str(), O_RDWR | O_TRUNC | O_CREAT, 0644);
-    struct iovec iov[5];
+    struct iovec iov[3];
     iov[0].iov_base = &current_term;
     iov[0].iov_len = sizeof(current_term);
     size_t size = voted_for.size();
@@ -483,8 +493,8 @@ void ServerNode::loadState()
         read(fd, &len, sizeof(len));
         voted_for.resize(len);
         read(fd, const_cast<char*>(voted_for.data()), len);
+        close(fd);
     }
-    close(fd);
 }
 
 void ServerNode::removeLogEntry(size_t from)
@@ -497,15 +507,14 @@ void ServerNode::removeLogEntry(size_t from)
     }
     off_t filesize = getFileSize(log_fd);
     off_t remain_bytes = filesize - remove_bytes;
-    char tmpfile[32] = "tmp.XXXXXX";
-    mktemp(tmpfile);
-    int tmpfd = open(tmpfile, O_RDWR | O_APPEND | O_CREAT, 0644);
+    auto tmpfile = getTmpFile();
+    int tmpfd = open(tmpfile.c_str(), O_RDWR | O_APPEND | O_CREAT, 0644);
     void *start = mmap(nullptr, remain_bytes, PROT_READ, MAP_SHARED, log_fd, 0);
     write(tmpfd, start, remain_bytes);
     fsync(tmpfd);
     close(tmpfd);
     munmap(start, remain_bytes);
-    rename(tmpfile, rconf.logfile.c_str());
+    rename(tmpfile.c_str(), rconf.logfile.c_str());
 }
 
 std::string ServerNode::generateRunid()
@@ -516,13 +525,6 @@ std::string ServerNode::generateRunid()
 void ServerNode::updateRecentLeader(const std::string& leader_id)
 {
     recent_leader = leader_id;
-}
-
-off_t ServerNode::getFileSize(int fd)
-{
-    struct stat st;
-    fstat(fd, &st);
-    return st.st_size;
 }
 
 void ServerEntry::start(ServerNode *self)
@@ -544,6 +546,19 @@ void ServerEntry::start(ServerNode *self)
             });
     client->not_exit_loop();
     client->start();
+}
+
+off_t ServerNode::getFileSize(int fd)
+{
+    struct stat st;
+    fstat(fd, &st);
+    return st.st_size;
+}
+
+std::string ServerNode::getTmpFile()
+{
+    char tmpfile[32] = "tmp.XXXXXX";
+    return mktemp(tmpfile);
 }
 
 void ServerNode::info(const char *fmt, ...)

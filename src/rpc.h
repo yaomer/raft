@@ -5,15 +5,17 @@
 #include <vector>
 #include <variant>
 
+#include <angel/buffer.h>
+
 namespace raft {
 
 struct LogEntry {
     LogEntry() = default;
     LogEntry(size_t leader_term, const std::string& command)
-        : leader_term(leader_term), cmd(command)
+        : term(leader_term), cmd(command)
     {
     }
-    size_t leader_term; // 创建该条日志的领导人的任期
+    size_t term; // 创建该条日志的领导人的任期
     std::string cmd;    // 要执行的命令
 };
 
@@ -37,7 +39,7 @@ struct AppendEntry {
     std::string leader_id;  // 领导人的id
     size_t prev_log_index;  // 最新日志之前日志的索引
     size_t prev_log_term;   // 最新日志之前日志的任期号
-    LogEntry log_entry;     // 要存储的日志条目
+    std::vector<LogEntry> logs; // 要存储的日志条目
     size_t leader_commit;   // 领导人已提交的日志的索引
 };
 
@@ -63,7 +65,7 @@ public:
     using rpcmsg = std::variant<AppendEntry, RequestVote, Reply>;
     rpc() : type(NONE) {  }
     int gettype() { return type; }
-    void parse(const char *s, const char *es);
+    void parse(angel::buffer& buf, int crlf);
     AppendEntry& ae() { return std::get<AppendEntry>(msg); }
     RequestVote& rv() { return std::get<RequestVote>(msg); }
     Reply& reply() { return std::get<Reply>(msg); }

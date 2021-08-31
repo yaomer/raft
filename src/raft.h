@@ -31,7 +31,7 @@ struct ServerEntry {
     std::unique_ptr<angel::client> client; // 到该服务器的连接
     // 初始化为领导人上一条日志的索引值+1
     size_t next_index = 0;  // 发送给该服务器的下一条日志条目的索引
-    // match_index=1表示log_entries[0]已经复制到该服务器上了
+    // match_index=1表示logs[0]已经复制到该服务器上了
     size_t match_index = 0; // 已经复制到该服务器上的最大日志的索引+1
 };
 
@@ -108,8 +108,9 @@ private:
     {
         last_recv_heartbeat_time = angel::util::get_cur_time_ms();
     }
-    // remove log_entries[from, end] and sync changes to [logfile]
+
     void removeLogEntry(size_t from);
+
     void clearCandidateInfo();
     void clearLeaderInfo();
     void clearFollowerInfo();
@@ -127,18 +128,30 @@ private:
 
     void updateRecentLeader(const std::string& leader_id);
 
+    void sendReply(const angel::connection_ptr& conn, int type, bool success)
+    {
+        switch (type) {
+        case AE_REPLY:
+            conn->format_send("AE_REPLY,%zu,%d\r\n", current_term, success);
+            break;
+        case RV_REPLY:
+            conn->format_send("RV_REPLY,%zu,%d\r\n", current_term, success);
+            break;
+        }
+    }
+
     // 在所有服务器上持久存在的
     std::string run_id;         // 服务器的运行时id（分布式唯一id）
     size_t current_term = 0;    // 服务器的当前任期，单调递增
     std::string voted_for;      // 当前任期内收到选票的候选人id（投给了谁）
     size_t votes;               // 当前任期内收到了多少票数
-    std::vector<LogEntry> log_entries;   // 要执行的日志条目
+    std::vector<LogEntry> logs; // 要执行的日志条目
     ////////////////////////////////////////////////////
     // 在所有服务器上不稳定存在的
     // 如果一条日志被复制到了大多数服务器上，就称为‘可提交的‘
-    // commit_index=1表示log_entries[0]已被提交了
+    // commit_index=1表示logs[0]已被提交了
     size_t commit_index = 0;    // 已被提交的最大日志条目的索引
-    // last_applied=1表示log_entries[0]已被应用到状态机了
+    // last_applied=1表示logs[0]已被应用到状态机了
     size_t last_applied = 0;    // 被状态机执行的最大日志条目的索引
     ////////////////////////////////////////////////////
     // 在领导人服务器上不稳定存在的（赢得选举之后初始化）

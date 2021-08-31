@@ -43,25 +43,19 @@ public:
     // 在该日志条目被领导人执行后，会根据conn_id进行回复
     using Clients = std::unordered_map<size_t, size_t>;
 
-    ServerNode(angel::evloop *loop, angel::inet_addr listen_addr, Service *service = new Service())
+    ServerNode(angel::evloop *loop, angel::inet_addr listen_addr, const std::string& confile,
+            Service *service = new Service())
         : loop(loop), server(loop, listen_addr), service(service)
     {
-        initServer();
+        initServer(confile);
         server.set_message_handler([this](const angel::connection_ptr& conn, angel::buffer& buf){
                 this->process(conn, buf);
                 });
     }
-    void start()
-    {
-        server.start();
-    }
-    ~ServerNode()
-    {
-        saveState();
-    }
+    void start() { server.start(); }
+    ~ServerNode() { saveState(); }
 private:
-
-    void initServer();
+    void initServer(const std::string& confile);
     void serverCron();
 
     ServerEntry *getServerEntry(const std::string& host)

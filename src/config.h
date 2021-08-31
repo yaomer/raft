@@ -22,7 +22,7 @@ struct rconf {
     election_timeout_info election_timeout;
     int heartbeat_period = 100;
     int server_cron_period = 100;
-    std::string confile = "../raft.conf";
+    std::string confile;
     std::string logfile;
     std::string statefile;
 };

@@ -5,12 +5,12 @@
 #include <vector>
 #include <unordered_map>
 
-#include "service.h"
+#include <raft/raft.h>
 
 // 一个简单的K-V服务
 // 1) set key value
 // 2) get key
-class kv : public Service {
+class kv : public raft::Service {
 public:
     typedef std::string Key;
     typedef std::string Value;

@@ -5,17 +5,18 @@
 #include <vector>
 #include <unordered_map>
 
-namespace raft {
+#include "service.h"
 
 // 一个简单的K-V服务
 // 1) set key value
 // 2) get key
-class kv {
+class kv : public Service {
 public:
     typedef std::string Key;
     typedef std::string Value;
     typedef std::vector<std::string> Argv;
-    void execute(const std::string& cmd)
+    kv() { name = "kv-server"; }
+    void apply(const std::string& cmd) override
     {
         if (!parse(cmd)) {
             set_reply("-format error");
@@ -38,9 +39,9 @@ public:
             set_reply("-unknown command");
         }
     }
-    std::string get_reply()
+    std::string reply() override
     {
-        return reply;
+        return res;
     }
 private:
     bool comp(const std::string& s, const std::string& t)
@@ -72,13 +73,11 @@ private:
     }
     void set_reply(const std::string& rs)
     {
-        reply = rs + "\r\n";
+        res = rs + "\r\n";
     }
     std::unordered_map<Key, Value> mp;
-    std::string reply;
+    std::string res;
     Argv argv;
 };
-
-}
 
 #endif // _RAFT_SRC_KV_H

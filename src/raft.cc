@@ -146,7 +146,7 @@ void ServerNode::applyLogEntry()
         // 此时[last_applied, commit_index)之间的所有日志条目都可以被应用到状态机
         auto& apply_log = log_entries[last_applied];
         if (apply_log.cmd != "")
-            kv.execute(apply_log.cmd);
+            service->apply(apply_log.cmd);
         info("log[%zu](%zu) is applied to the state machine",
                 last_applied, apply_log.leader_term);
         if (role == LEADER) { // 回复客户端
@@ -154,7 +154,7 @@ void ServerNode::applyLogEntry()
             if (it != clients.end()) {
                 auto conn = server.get_connection(it->second);
                 if (conn->is_connected())
-                    conn->send(kv.get_reply());
+                    conn->send(service->reply());
                 clients.erase(it);
             }
         }
@@ -297,12 +297,12 @@ void ServerNode::updateCommitIndex(AppendEntry& ae)
 
 void ServerNode::votedForCandidate(const angel::connection_ptr& conn, RequestVote& rv)
 {
-    updateLastRecvHeartbeatTime();
     if ((voted_for.empty() || voted_for == rv.candidate_id)) {
         if (logUpToDate(rv.last_log_index, rv.last_log_term)) {
             voted_for = rv.candidate_id;
             conn->format_send("RV_REPLY,%zu,1\r\n", current_term);
             info("voted for %s", voted_for.c_str());
+            updateLastRecvHeartbeatTime();
             saveState();
             return;
         }
@@ -578,6 +578,8 @@ void ServerNode::info(const char *fmt, ...)
 	va_end(ap);
 }
 
+#include "kv.h"
+
 int main(int argc, char *argv[])
 {
     angel::set_log_level(angel::logger::level::info);
@@ -586,6 +588,8 @@ int main(int argc, char *argv[])
         printf("usage: serv [listen port]\n");
         return 1;
     }
-    ServerNode node(&loop, angel::inet_addr("127.0.0.1", atoi(argv[1])));
+    angel::inet_addr listen_addr("127.0.0.1", atoi(argv[1]));
+    ServerNode raft_node(&loop, listen_addr, new kv());
+    raft_node.start();
     loop.run();
 }

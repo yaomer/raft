@@ -10,7 +10,7 @@
 #include <angel/client.h>
 
 #include "rpc.h"
-#include "kv.h"
+#include "service.h"
 
 namespace raft {
 
@@ -43,17 +43,23 @@ public:
     // 在该日志条目被领导人执行后，会根据conn_id进行回复
     using Clients = std::unordered_map<size_t, size_t>;
 
-    ServerNode(angel::evloop *loop, angel::inet_addr listen_addr)
-        : server(loop, listen_addr)
+    ServerNode(angel::evloop *loop, angel::inet_addr listen_addr, Service *service = new Service())
+        : loop(loop), server(loop, listen_addr), service(service)
     {
-        this->loop = loop;
         initServer();
         server.set_message_handler([this](const angel::connection_ptr& conn, angel::buffer& buf){
                 this->process(conn, buf);
                 });
+    }
+    void start()
+    {
         server.start();
     }
-    ~ServerNode() { saveState(); }
+    ~ServerNode()
+    {
+        saveState();
+    }
+private:
 
     void initServer();
     void serverCron();
@@ -93,7 +99,7 @@ public:
     static std::string getTmpFile();
 
     void info(const char *fmt, ...);
-private:
+
     bool logUpToDate(size_t, size_t);
     void appendLogEntry(size_t term, const std::string& cmd);
     void sendLogEntry(ServerEntry *serv);
@@ -153,7 +159,7 @@ private:
     // 用于为客户端重定向到领导人
     std::string recent_leader;
     ////////////////////////////////////////////////////
-    kv kv;
+    std::unique_ptr<Service> service;
 
     friend ServerEntry;
 };

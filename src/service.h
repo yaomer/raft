@@ -11,6 +11,12 @@ struct Service {
     virtual ~Service() {  }
     virtual void apply(const std::string& cmd) {  }
     virtual std::string reply() { return name;  }
+    // 以追加的方式打开文件，将状态机数据追加到文件末尾
+    virtual void saveSnapshot(const std::string& filename) {  }
+    // 从offset处载入快照
+    virtual void loadSnapshot(const std::string& filename, off_t offset) {  }
+    // 快照是否创建完成，一般都会使用COW技术来优化
+    virtual bool isSavedSnapshot() { return false; }
 
     std::string name;
 };

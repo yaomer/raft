@@ -10,6 +10,7 @@ namespace raft {
 // <logs> <[items][log1][log2]...>
 // [RV_RPC] [RV_RPC,candidate_term,candidate_id,last_log_index,last_log_term\r\n]
 // [HB_RPC] [HB_RPC,leader_term,leader_id,prev_log_index,prev_log_term,leader_commit\r\n]
+// [IS_RPC] [IS_RPC,leader_term,leader_id,last_included_index,last_included_term,offset,done,datasize\r\n<data>]
 // [AE_REPLY] [AE_REPLY,term,success\r\n]
 // [RV_REPLY] [RV_REPLY,term,success\r\n]
 // ==================================================================================================
@@ -20,8 +21,10 @@ static int getrpctype(const std::string& type)
         { "AE_RPC", AE_RPC },
         { "RV_RPC", RV_RPC },
         { "HB_RPC", HB_RPC },
+        { "IS_RPC", IS_RPC },
         { "AE_REPLY", AE_REPLY },
         { "RV_REPLY", RV_REPLY },
+        { "IS_REPLY", IS_REPLY },
     };
     return typemap.count(type) ? typemap[type] : NONE;
 }
@@ -118,7 +121,31 @@ void rpc::parse(angel::buffer& buf, int crlf)
         msg = rv;
         break;
     }
-    case AE_REPLY: case RV_REPLY: {
+    case IS_RPC: {
+        InstallSnapshot snapshot;
+        ts.assign(p + indexs[5] + 1, es);
+        size_t datasize = stoul(ts);
+        if (buf.readable() < crlf + 2 + datasize) {
+            type = NONE;
+            break;
+        }
+        ts.assign(p, p + indexs[0]);
+        snapshot.leader_term = stoul(ts);
+        snapshot.leader_id.assign(p + indexs[0] + 1, p + indexs[1]);
+        ts.assign(p + indexs[1] + 1, p + indexs[2]);
+        snapshot.last_included_index = stoul(ts);
+        ts.assign(p + indexs[2] + 1, p + indexs[3]);
+        snapshot.last_included_term = stoul(ts);
+        ts.assign(p + indexs[3] + 1, p + indexs[4]);
+        snapshot.offset = stoul(ts);
+        ts.assign(p + indexs[4] + 1, p + indexs[5]);
+        snapshot.done = stoul(ts);
+        snapshot.data.assign(es + 2, datasize);
+        buf.retrieve(crlf + 2 + datasize);
+        msg = snapshot;
+        break;
+    }
+    case AE_REPLY: case RV_REPLY: case IS_REPLY: {
         Reply reply;
         ts.assign(p, p + indexs[0]);
         reply.term = stoul(ts);
@@ -138,7 +165,9 @@ size_t rpc::getterm()
         return ae().leader_term;
     case RV_RPC:
         return rv().candidate_term;
-    case AE_REPLY: case RV_REPLY:
+    case IS_RPC:
+        return snapshot().leader_term;
+    case AE_REPLY: case RV_REPLY: case IS_REPLY:
         return reply().term;
     }
     return 0;

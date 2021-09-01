@@ -24,15 +24,13 @@ enum RpcType {
     AE_RPC,
     RV_RPC,
     HB_RPC,
+    IS_RPC,
     AE_REPLY,
     RV_REPLY,
+    IS_REPLY,
 };
 
-// 因为term永远大于0，所以我们用prev_log_term=0来处理以下特殊情况：
-// 1. leader上现在还没有日志
-// 2. leader上只有一条日志
-// 所以当发现prev_log_term=0时，只需忽略prev_log_index和prev_log_term即可
-// (之所以不设置为-1，因为都是size_t)
+// prev_log_term = 0表示这是leader上的第一条日志
 struct AppendEntry {
     AppendEntry() = default;
     size_t leader_term;     // 领导人的任期号
@@ -43,7 +41,7 @@ struct AppendEntry {
     size_t leader_commit;   // 领导人已提交的日志的索引
 };
 
-// last_log_term=0表明leader上现在还没有日志，忽略last_log_index和last_log_term即可
+// last_log_term = 0表明leader上日志为空
 struct RequestVote {
     RequestVote() = default;
     size_t candidate_term;      // 候选人的任期号
@@ -52,8 +50,20 @@ struct RequestVote {
     size_t last_log_term;       // 候选人最新日志条目对应的任期号
 };
 
+struct InstallSnapshot {
+    InstallSnapshot() = default;
+    size_t leader_term;
+    std::string leader_id;
+    size_t last_included_index;
+    size_t last_included_term;
+    size_t offset;
+    std::string data;
+    bool done;
+};
+
 // 用于回复AE RPC时，term用于领导人更新自己，一致性检查成功则success为真
 // 用于回复RV RPC时，term用于候选人更新自己，将票投给了候选人则success为真
+// 用于回复IS RPC时，忽略success即可
 struct Reply {
     Reply() = default;
     size_t term;
@@ -62,12 +72,13 @@ struct Reply {
 
 class rpc {
 public:
-    using rpcmsg = std::variant<AppendEntry, RequestVote, Reply>;
+    using rpcmsg = std::variant<AppendEntry, RequestVote, InstallSnapshot, Reply>;
     rpc() : type(NONE) {  }
     int gettype() { return type; }
     void parse(angel::buffer& buf, int crlf);
     AppendEntry& ae() { return std::get<AppendEntry>(msg); }
     RequestVote& rv() { return std::get<RequestVote>(msg); }
+    InstallSnapshot& snapshot() { return std::get<InstallSnapshot>(msg); }
     Reply& reply() { return std::get<Reply>(msg); }
     size_t getterm();
     void print();

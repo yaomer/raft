@@ -7,6 +7,11 @@
 
 #include <raft/raft.h>
 
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/mman.h>
+
 // 一个简单的K-V服务
 // 1) set key value
 // 2) get key
@@ -43,6 +48,65 @@ public:
     {
         return res;
     }
+    void saveSnapshot(const std::string& filename) override
+    {
+        int fd = open(filename.c_str(), O_RDWR | O_APPEND);
+        child_pid = fork();
+        if (child_pid == 0) {
+            struct iovec iov[4];
+            for (const auto& [k, v] : mp) {
+                // [key-len][key][value-len][value]
+                size_t klen = k.size();
+                iov[0].iov_base = &klen;
+                iov[0].iov_len = sizeof(klen);
+                iov[1].iov_base = const_cast<char*>(k.data());
+                iov[1].iov_len = klen;
+                size_t vlen = v.size();
+                iov[2].iov_base = &vlen;
+                iov[2].iov_len = sizeof(vlen);
+                iov[3].iov_base = const_cast<char*>(v.data());
+                iov[3].iov_len = vlen;
+                writev(fd, iov, 4);
+            }
+            fsync(fd);
+            close(fd);
+            exit(0);
+        }
+    }
+    bool isSavedSnapshot() override
+    {
+        if (child_pid != -1) {
+            if (waitpid(child_pid, nullptr, WNOHANG) > 0) {
+                child_pid = -1;
+                return true;
+            }
+        }
+        return false;
+    }
+    void loadSnapshot(const std::string& filename, off_t offset) override
+    {
+        int fd = open(filename.c_str(), O_RDONLY);
+        struct stat st;
+        fstat(fd, &st);
+        void *start = mmap(nullptr, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+        if (start == MAP_FAILED) return;
+        char *buf = reinterpret_cast<char*>(start);
+        char *end = buf + st.st_size;
+        buf += offset;
+        while (buf < end) {
+            size_t len = *reinterpret_cast<size_t*>(buf);
+            buf += sizeof(len);
+            std::string key(buf, len);
+            buf += len;
+            len = *reinterpret_cast<size_t*>(buf);
+            buf += sizeof(len);
+            std::string value(buf, len);
+            buf += len;
+            mp.emplace(std::move(key), std::move(value));
+        }
+        munmap(start, st.st_size);
+        close(fd);
+    }
 private:
     bool comp(const std::string& s, const std::string& t)
     {
@@ -78,6 +142,7 @@ private:
     std::unordered_map<Key, Value> mp;
     std::string res;
     Argv argv;
+    pid_t child_pid = -1;
 };
 
 #endif // _RAFT_SRC_KV_H

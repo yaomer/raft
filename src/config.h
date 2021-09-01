@@ -22,9 +22,10 @@ struct rconf {
     election_timeout_info election_timeout;
     int heartbeat_period = 100;
     int server_cron_period = 100;
+    int snapshot_threshold = 100;
     std::string confile;
-    std::string logfile;
     std::string statefile;
+    std::string snapshot;
 };
 
 extern struct rconf rconf;

@@ -10,13 +10,16 @@ set (SRC
     ${RAFT}/rpc.cc
     ${RAFT}/raft.cc
     ${RAFT}/config.cc
+    ${RAFT}/logs.cc
 )
 
 set (HEADERS
     ${RAFT}/rpc.h
     ${RAFT}/raft.h
     ${RAFT}/config.h
+    ${RAFT}/logs.h
     ${RAFT}/service.h
+    ${RAFT}/util.h
 )
 
 add_library(angel STATIC IMPORTED)

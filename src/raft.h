@@ -10,6 +10,7 @@
 #include <angel/client.h>
 
 #include "rpc.h"
+#include "logs.h"
 #include "service.h"
 
 namespace raft {
@@ -52,8 +53,9 @@ public:
                 this->process(conn, buf);
                 });
     }
-    void start() { server.start(); }
     ~ServerNode() { saveState(); }
+    void start() { server.start(); }
+    void info(const char *fmt, ...);
 private:
     void initServer(const std::string& confile);
     void serverCron();
@@ -73,7 +75,7 @@ private:
     void processRpcAsFollower(const angel::connection_ptr& conn, rpc& r);
 
     void sendLogEntry();
-    void recvLogEntryFromLeader(const angel::connection_ptr& conn, AppendEntry& ae);
+    void recvLogEntry(const angel::connection_ptr& conn, AppendEntry& ae);
     void votedForCandidate(const angel::connection_ptr& conn, RequestVote& rv);
 
     void sendLogEntrySuccessfully(const angel::connection_ptr& conn);
@@ -89,13 +91,12 @@ private:
     void requestServersToVote();
     void becomeNewLeader();
 
-    static off_t getFileSize(int fd);
-    static std::string getTmpFile();
+    void recvSnapshot(const angel::connection_ptr& conn, InstallSnapshot& snapshot);
+    void sendSnapshot(const angel::connection_ptr& conn);
+    void saveSnapshot();
+    void loadSnapshot();
 
-    void info(const char *fmt, ...);
-
-    bool logUpToDate(size_t, size_t);
-    void appendLogEntry(size_t term, const std::string& cmd);
+    bool logUpToDate(RequestVote& rv);
     void sendLogEntry(ServerEntry *serv);
     void updateCommitIndex(AppendEntry& ae);
     void updateLastRecvHeartbeatTime()
@@ -103,15 +104,12 @@ private:
         last_recv_heartbeat_time = angel::util::get_cur_time_ms();
     }
 
-    void removeLogEntry(size_t from);
-
     void clearCandidateInfo();
     void clearLeaderInfo();
     void clearFollowerInfo();
 
     void saveState();
     void loadState();
-    void loadLog();
 
     void setPaths();
     void connectNodes();
@@ -131,15 +129,18 @@ private:
         case RV_REPLY:
             conn->format_send("RV_REPLY,%zu,%d\r\n", current_term, success);
             break;
+        case IS_REPLY:
+            conn->format_send("IS_REPLY,%zu,%d\r\n", current_term, success);
+            break;
         }
     }
 
     // 在所有服务器上持久存在的
-    std::string run_id;         // 服务器的运行时id（分布式唯一id）
+    std::string run_id;         // 服务器的运行时id
     size_t current_term = 0;    // 服务器的当前任期，单调递增
     std::string voted_for;      // 当前任期内收到选票的候选人id（投给了谁）
     size_t votes;               // 当前任期内收到了多少票数
-    std::vector<LogEntry> logs; // 要执行的日志条目
+    Logs logs;                  // 要执行的日志条目
     ////////////////////////////////////////////////////
     // 在所有服务器上不稳定存在的
     // 如果一条日志被复制到了大多数服务器上，就称为‘可提交的‘
@@ -162,9 +163,17 @@ private:
     size_t heartbeat_timer_id = 0;
     // 最后一次收到心跳包的时间戳(ms)
     int64_t last_recv_heartbeat_time = angel::util::get_cur_time_ms();
-    int log_fd = -1;
     // 用于为客户端重定向到领导人
     std::string recent_leader;
+    // 生成快照和接收快照时使用的临时文件
+    std::string snapshot_tmpfile;
+    int snapshot_fd = -1;
+    // 上一次快照包含的元信息
+    size_t last_included_index = 0;
+    size_t last_included_term = 0;
+    // 不能同时接收和生成快照
+    enum { RECV_SNAPSHOT = 1, SAVE_SNAPSHOT };
+    int snapshot_state = 0;
     ////////////////////////////////////////////////////
     std::unique_ptr<Service> service;
 

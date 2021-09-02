@@ -109,7 +109,8 @@ void ServerNode::sendLogEntry(ServerEntry *serv)
     size_t prev_log_index = 0, prev_log_term = 0;
     if (serv->next_index > 0) {
         prev_log_index = serv->next_index - 1;
-        prev_log_term = prev_log_index == last_included_index ? last_included_term : logs[prev_log_index].term;
+        if (prev_log_index < logs.baseIndex()) prev_log_term = last_included_term;
+        else prev_log_term = logs[prev_log_index].term;
     }
     conn->format_send("AE_RPC,%zu,%s,%zu,%zu,%zu,%zu\r\n", current_term, run_id.c_str(),
             prev_log_index, prev_log_term, commit_index, buffer.size());
@@ -169,7 +170,7 @@ void ServerNode::applyLogEntry()
             auto it = clients.find(last_applied);
             if (it != clients.end()) {
                 auto conn = server.get_connection(it->second);
-                if (conn->is_connected())
+                if (conn && conn->is_connected())
                     conn->send(service->reply());
                 clients.erase(it);
             }
@@ -324,6 +325,13 @@ void ServerNode::updateCommitIndex(AppendEntry& ae)
     }
 }
 
+// 领导人完全原则：一个新的领导人一定拥有已被提交的所有日志条目
+//
+// 因为一个候选人要想成为领导人，就必须获得集群中大多数节点(s1)的投票，
+// 而一个节点只有当候选人的日志至少和自己一样新时才会投给他。
+// 这意味着，只要有一条日志被提交了，即复制到了大多数节点上(s2)，那么s1与s2就必然至少拥有一个交集，
+// 即s2中至少有一个节点会给新的领导人投票。
+//
 void ServerNode::votedForCandidate(const angel::connection_ptr& conn, RequestVote& rv)
 {
     if ((voted_for.empty() || voted_for == rv.candidate_id)) {
@@ -383,13 +391,15 @@ void ServerNode::serverCron()
             startLeaderElection();
         }
     }
-    if (last_applied - logs.baseIndex() >= rconf.snapshot_threshold) {
-        saveSnapshot();
+    if (rconf.snapshot_threshold > 0) {
+        if (last_applied - logs.baseIndex() >= rconf.snapshot_threshold) {
+            saveSnapshot();
+        }
     }
     if (service->isSavedSnapshot()) {
         logs.removeBefore(last_included_index);
+        close(snapshot_fd);
         rename(snapshot_tmpfile.c_str(), rconf.snapshot.c_str());
-        remove(snapshot_tmpfile.c_str());
         logs.setLastLog(last_included_index, last_included_term);
         snapshot_state = 0;
         info("saved snapshot [index: %zu, term: %zu]", last_included_index, last_included_term);
@@ -516,7 +526,6 @@ void ServerNode::recvSnapshot(const angel::connection_ptr& conn, InstallSnapshot
     fsync(snapshot_fd);
     close(snapshot_fd);
     rename(snapshot_tmpfile.c_str(), rconf.snapshot.c_str());
-    remove(snapshot_tmpfile.c_str());
     snapshot_state = 0;
 
     last_included_index = snapshot.last_included_index;

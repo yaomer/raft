@@ -8,6 +8,7 @@ namespace raft {
 class Logs {
 public:
     Logs() {  }
+    ~Logs();
     void setLogFile(const std::string& file);
     void append(size_t term, const std::string& cmd);
     void remove(size_t from);

@@ -7,6 +7,11 @@
 
 using namespace raft;
 
+Logs::~Logs()
+{
+    close(logfd);
+}
+
 void Logs::setLogFile(const std::string& file)
 {
     logfile = file;
@@ -50,7 +55,7 @@ void Logs::remove(size_t from)
     for (size_t i = from; i < logs.size(); i++) {
         remove_bytes += logs[i].cmd.size() + sizeof(size_t) * 2;
     }
-    logs.erase(logs.begin() + from);
+    logs.erase(logs.begin() + from, logs.end());
     off_t filesize = getFileSize(logfd);
     off_t remain_bytes = filesize - remove_bytes;
     auto tmpfile = getTmpFile();
@@ -61,6 +66,8 @@ void Logs::remove(size_t from)
     close(tmpfd);
     munmap(start, remain_bytes);
     rename(tmpfile.c_str(), logfile.c_str());
+    close(logfd);
+    logfd = open(logfile.c_str(), O_RDWR | O_APPEND | O_CREAT, 0644);
 }
 
 void Logs::removeBefore(size_t to)
@@ -82,6 +89,8 @@ void Logs::removeBefore(size_t to)
     close(tmpfd);
     munmap(start, filesize);
     rename(tmpfile.c_str(), logfile.c_str());
+    close(logfd);
+    logfd = open(logfile.c_str(), O_RDWR | O_APPEND | O_CREAT, 0644);
 }
 
 void Logs::load()

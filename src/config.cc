@@ -44,8 +44,7 @@ void readConf(const std::string& confile)
     for (auto& param : paramlist) {
         if (param[0].compare("node") == 0) {
             node_info node;
-            node.ip = param[1];
-            node.port = stoi(param[2]);
+            node.host = param[1] + ":" + param[2];
             rconf.nodes.emplace_back(node);
         } else if (param[0].compare("election_timeout") == 0) {
             rconf.election_timeout.base = stoi(param[1]);

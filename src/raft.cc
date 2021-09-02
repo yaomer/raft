@@ -33,11 +33,11 @@ void ServerNode::initServer(const std::string& confile)
 void ServerNode::connectNodes()
 {
     for (auto& node : rconf.nodes) {
-        if (node.port == server.listen_addr().to_host_port())
+        if (node.host == server.listen_addr().to_host())
             continue;
-        auto se = new ServerEntry(loop, angel::inet_addr(node.ip.c_str(), node.port));
+        auto se = new ServerEntry(loop, angel::inet_addr(node.host));
         se->start(this);
-        server_entries.emplace(node.ip + ":" + std::to_string(node.port), se);
+        server_entries.emplace(node.host, se);
     }
 }
 

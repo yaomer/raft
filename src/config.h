@@ -7,8 +7,8 @@
 namespace raft {
 
 struct node_info {
-    std::string ip;
-    int port;
+    // [ip:port]
+    std::string host;
 };
 
 struct election_timeout_info {

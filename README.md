@@ -1,6 +1,39 @@
-### cluster
+raft
+===
+<table>
+<tbody>
+<tr>
+  <th>领导选举</th>
+  <td>✔️</td>
+</tr>
+<tr>
+  <th>日志复制</th>
+  <td>✔️</td>
+</tr>
+<tr>
+  <th>日志压缩</th>
+  <td>✔️</td>
+</tr>
+<tr>
+  <th>成员变化</th>
+  <td>❌</td>
+</tr>
+<tr>
+  <th>状态机接口</th>
+  <td>✔️</td>
+</tr>
+<tr>
+  <th>客户端</th>
+  <td>✔️</td>
+</tr>
+</tbody>
+</table>
 
-假如你的配置文件中`cluster nodes`的配置是这样的，有5个节点
+cluster
+===
+我们以一个简单的运行在`raft`上的[k-v server](https://github.com/yaomer/raft/tree/master/examples/kv)为例
+
+假设集群配置为5节点
 ```
 # cluster nodes
 node 127.0.0.1 8000
@@ -9,7 +42,7 @@ node 127.0.0.1 8002
 node 127.0.0.1 8003
 node 127.0.0.1 8004
 ```
-那么，你就可以打开5个终端，在每个终端分别执行
+然后，你可以打开5个终端，在每个终端分别执行
 ```
 $ ./serv 8000
 $ ./serv 8001
@@ -17,25 +50,10 @@ $ ./serv 8002
 $ ./serv 8003
 $ ./serv 8004
 ```
-这样就可以将cluster跑起来了，然后你可以尝试kill掉其中的任何一个节点(leader or follower)，
-或者将被kill掉的节点重新拉起，来观察cluster的工作过程。
+这样就可以将集群跑起来了
 
-但请注意，一旦剩余节点数量小于3，cluster将不能正常工作。
+你可以动态改变节点的存活情况来观察`raft`的工作原理
 
-### client
-
-+ client每次开始运行时会随机在cluster nodes中挑选一个
-+ 如果连接超时，就再随机选一个
-+ 如果连接上的不是leader，那么leader会发送`<host>host\r\n`来帮client重定向到leader
-+ 如果连接上的是leader，那么就可以正常通信了，消息格式为`<user>msg\r\n`。
-我在raft上运行了一个只支持`set`和`get`的简单的K-V服务，所以服务端的响应分为3种：`+ok\r\n`，`-error\r\n`，`$reply\r\n`
-+ 如果之后leader崩溃了，就重复上述步骤
-
-#### 下面是一些运行截图
-![](https://github.com/yaomer/pictures/blob/master/raft-cli.png?raw=true)
-
-![](https://github.com/yaomer/pictures/blob/master/raft-s0.png?raw=true)
-
-![](https://github.com/yaomer/pictures/blob/master/raft-s1.png?raw=true)
-
-![](https://github.com/yaomer/pictures/blob/master/raft-s2.png?raw=true)
++ `raft-node`接收的用户消息格式为`<user>msg\r\n`，响应格式由`上层状态机(k-v)`与客户端约定
+    + 目前`k-v`只支持`set`和`get`，所以响应有3种：`+ok\r\n`，`-err\r\n`，`$reply\r\n`
++ 如果`raft-node`发现自己不是`leader`，就会发送`<host>host\r\n`以帮助客户端`重定向到leader`

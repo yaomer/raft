@@ -23,9 +23,11 @@ struct LogType {
     static const unsigned char noop = '@';
     // 配置变更日志
     // Cold,new
-    static const unsigned char old_new_config = '0';
+    static const unsigned char old_new_config = 't';
     // Cnew
-    static const unsigned char new_config = '1';
+    static const unsigned char new_config = 'n';
+    // Cold
+    static const unsigned char old_config = 'o';
 } logtype;
 
 void ServerNode::initServer()
@@ -37,7 +39,8 @@ void ServerNode::initServer()
     loadState();
     logs.load();
     loadSnapshot();
-    loop->run_every(rconf.server_cron_period, [this]{ this->serverCron(); });
+    int period = std::min(50, rconf.heartbeat_period);
+    loop->run_every(period, [this]{ this->serverCron(); });
 }
 
 void ServerNode::connectNodes()
@@ -131,6 +134,7 @@ void ServerNode::startConfigChange(std::string& config)
     // 同步到使用新旧配置的所有节点上
     applyOldNewConfig();
     sendLogEntry();
+    setConfigChangeTimer();
 }
 
 void ServerNode::applyOldNewConfig()
@@ -149,6 +153,55 @@ void ServerNode::applyOldNewConfig()
             server_entries.emplace(host, se);
         }
     }
+}
+
+void ServerNode::setConfigChangeTimer()
+{
+    int timeout = getElectionTimeout();
+    config_change_timer_id = loop->run_after(timeout, [this]{ this->rollbackConfigChange(); });
+}
+
+void ServerNode::cancelConfigChangeTimer()
+{
+    loop->cancel_timer(config_change_timer_id);
+}
+
+void ServerNode::rollbackConfigChange()
+{
+    std::string old_config(1, logtype.old_config);
+    logs.append(current_term, old_config);
+    sendLogEntry();
+    if (!old_config_nodes.count(self_host)) {
+        info("I'm not in the old configuration, ready to quit...");
+        server_entries.clear();
+        loop->quit();
+    }
+    rollbackOldConfig();
+    clearConfigChangeInfo();
+}
+
+void ServerNode::rollbackOldConfig()
+{
+    // Cold,new -> Cold
+    // 移除不在旧配置中的节点
+    for (auto it = server_entries.begin(); it != server_entries.end(); ) {
+        if (!old_config_nodes.count(it->first)) {
+            it = server_entries.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    // Cnew -> Cold
+    // 添加旧配置中有，但server_entries中没有的节点
+    for (auto& host : old_config_nodes) {
+        if (host != self_host && !server_entries.count(host)) {
+            auto se = new ServerEntry(loop, angel::inet_addr(host));
+            se->start(this);
+            server_entries.emplace(host, se);
+        }
+    }
+    updateConfigFile(old_config_nodes);
+    info("cluster member change failed, rollback to the old configuration");
 }
 
 void ServerNode::sendLogEntry()
@@ -238,6 +291,11 @@ void ServerNode::applyLogEntry()
             apply_log.cmd.pop_back();
             service->apply(apply_log.cmd);
             apply_log.cmd.append(1, logtype.cmd);
+        }
+        if (role == FOLLOWER && config_change_state == NEW_CONFIG) {
+            if (apply_log.cmd.back() == logtype.new_config) {
+                completeConfigChange();
+            }
         }
         info("log[%zu](%zu) is applied to the state machine", last_applied, apply_log.term);
         if (role == LEADER) { // 回复客户端
@@ -332,14 +390,17 @@ void ServerNode::commitConfigLogEntry()
             commit_map[serv.second->match_index]++;
         }
     }
+    bool new_commit = false;
     size_t new_majority = getNewMajority();
     for (auto& [n, commits] : commit_map) {
         if (n <= commit_index) continue;
         if (commits >= new_majority && logs[n - 1].term == current_term) {
             commit_index = n;
+            new_commit = true;
             break;
         }
     }
+    if (!new_commit) return;
     if (config_change_state == OLD_NEW_CONFIG) {
         // 提交一条Cnew日志
         // (Cold,new中已经携带了相关配置信息)
@@ -366,7 +427,7 @@ void ServerNode::applyNewConfig()
     }
 }
 
-void ServerNode::updateConfigFile()
+void ServerNode::updateConfigFile(std::unordered_set<std::string>& config_nodes)
 {
     char buf[1024];
     bool update = false;
@@ -376,7 +437,7 @@ void ServerNode::updateConfigFile()
     while (fgets(buf, sizeof(buf), fp)) {
         if (strlen(buf) >= 4 && strncmp(buf, "node", 4) == 0) {
             if (update) continue;
-            for (auto& host : new_config_nodes) {
+            for (auto& host : config_nodes) {
                 std::string line("node ");
                 auto p = std::find(host.begin(), host.end(), ':');
                 std::string ip(host.begin(), p);
@@ -404,7 +465,13 @@ void ServerNode::completeConfigChange()
         server_entries.clear();
         loop->quit();
     }
-    updateConfigFile();
+    updateConfigFile(new_config_nodes);
+    cancelConfigChangeTimer();
+    clearConfigChangeInfo();
+}
+
+void ServerNode::clearConfigChangeInfo()
+{
     old_config_nodes.clear();
     new_config_nodes.clear();
     config_change_state = 0;
@@ -457,6 +524,9 @@ void ServerNode::becomeNewLeader()
     logs.append(current_term, noop);
     info("append an empty log[%zu](%zu)", logs.end() - 1, current_term);
     sendLogEntry();
+    if (config_change_state) {
+        setConfigChangeTimer();
+    }
 }
 
 void ServerNode::processRpcAsFollower(const angel::connection_ptr& conn, rpc& r)
@@ -504,14 +574,7 @@ void ServerNode::recvLogEntry(const angel::connection_ptr& conn, AppendEntry& ae
         // 追加新日志
         logs.append(log.term, log.cmd);
         info("append a new log[%zu](%zu)", logs.end() - 1, log.term);
-        switch (log.cmd.back()) {
-        case logtype.old_new_config:
-            recvOldNewConfigLogEntry(log);
-            break;
-        case logtype.new_config:
-            recvNewConfigLogEntry(log);
-            break;
-        }
+        recvConfigLogEntry(log);
 next:
         if (ae.prev_log_term > 0) ae.prev_log_index++;
         ae.prev_log_term = log.term;
@@ -521,6 +584,21 @@ next:
     return;
 fail:
     sendReply(conn, AE_REPLY, false);
+}
+
+void ServerNode::recvConfigLogEntry(const LogEntry& log)
+{
+    switch (log.cmd.back()) {
+    case logtype.old_new_config:
+        recvOldNewConfigLogEntry(log);
+        break;
+    case logtype.new_config:
+        recvNewConfigLogEntry(log);
+        break;
+    case logtype.old_config:
+        recvOldConfigLogEntry(log);
+        break;
+    }
 }
 
 void ServerNode::recvOldNewConfigLogEntry(const LogEntry& log)
@@ -537,9 +615,18 @@ void ServerNode::recvOldNewConfigLogEntry(const LogEntry& log)
 
 void ServerNode::recvNewConfigLogEntry(const LogEntry& log)
 {
+    if (config_change_state != OLD_NEW_CONFIG) return;
     info("recvd a Cnew log[%zu](%zu)", logs.end() - 1, log.term);
     applyNewConfig();
-    completeConfigChange();
+    config_change_state = NEW_CONFIG;
+}
+
+void ServerNode::recvOldConfigLogEntry(const LogEntry& log)
+{
+    if (!config_change_state) return;
+    info("recvd a Cold log[%zu](%zu)", logs.end() - 1, log.term);
+    rollbackOldConfig();
+    clearConfigChangeInfo();
 }
 
 void ServerNode::updateCommitIndex(AppendEntry& ae)
@@ -613,7 +700,7 @@ void ServerNode::serverCron()
         updateLastRecvHeartbeatTime();
     } else if (role == FOLLOWER) {
         auto now = angel::util::get_cur_time_ms();
-        if (now - last_recv_heartbeat_time > rconf.election_timeout.base + rconf.election_timeout.range) {
+        if (now - last_recv_heartbeat_time > timeout) {
             startLeaderElection();
         }
     }
@@ -675,8 +762,7 @@ void ServerNode::startLeaderElection()
 
 void ServerNode::setElectionTimer()
 {
-    ::srand(::time(nullptr));
-    time_t timeout = rconf.election_timeout.base + ::rand() % rconf.election_timeout.range;
+    timeout = getElectionTimeout();
     election_timer_id = loop->run_after(timeout, [this]{
             this->startLeaderElection();
             });
@@ -685,6 +771,12 @@ void ServerNode::setElectionTimer()
 void ServerNode::cancelElectionTimer()
 {
     loop->cancel_timer(election_timer_id);
+}
+
+int ServerNode::getElectionTimeout()
+{
+    ::srand(::time(nullptr));
+    return rconf.election_timeout.base + ::rand() % rconf.election_timeout.range;
 }
 
 // 请求别的服务器给自己投票

@@ -56,8 +56,6 @@ void readConf(const std::string& confile)
             rconf.election_timeout.range = stoi(param[2]);
         } else if (param[0].compare("heartbeat_period") == 0) {
             rconf.heartbeat_period = stoi(param[1]);
-        } else if (param[0].compare("server_cron_period") == 0) {
-            rconf.server_cron_period = stoi(param[1]);
         } else if (param[0].compare("snapshot_threshold") == 0) {
             rconf.snapshot_threshold = stoi(param[1]);
         } else if (param[0].compare("learner") == 0) {

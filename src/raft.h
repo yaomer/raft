@@ -82,10 +82,18 @@ private:
     void commitConfigLogEntry();
     void applyOldNewConfig();
     void applyNewConfig();
+    void recvConfigLogEntry(const LogEntry& log);
     void recvOldNewConfigLogEntry(const LogEntry& log);
     void recvNewConfigLogEntry(const LogEntry& log);
-    void updateConfigFile();
+    void updateConfigFile(std::unordered_set<std::string>& config_nodes);
     void completeConfigChange();
+    void clearConfigChangeInfo();
+
+    void setConfigChangeTimer();
+    void cancelConfigChangeTimer();
+    void rollbackConfigChange();
+    void rollbackOldConfig();
+    void recvOldConfigLogEntry(const LogEntry& log);
 
     void sendLogEntry();
     void recvLogEntry(const angel::connection_ptr& conn, AppendEntry& ae);
@@ -103,6 +111,7 @@ private:
     void cancelElectionTimer();
     void requestServersToVote();
     void becomeNewLeader();
+    int getElectionTimeout();
 
     void recvSnapshot(const angel::connection_ptr& conn, InstallSnapshot& snapshot);
     void sendSnapshot(const angel::connection_ptr& conn);
@@ -196,6 +205,7 @@ private:
     // 分别收到了新旧配置节点各多少票
     size_t new_votes = 0;
     size_t old_votes = 0;
+    size_t config_change_timer_id = 0;
     enum { OLD_NEW_CONFIG = 1, NEW_CONFIG };
     int config_change_state = 0;
     ////////////////////////////////////////////////////
@@ -210,6 +220,7 @@ private:
     size_t heartbeat_timer_id = 0;
     // 最后一次收到心跳包的时间戳(ms)
     int64_t last_recv_heartbeat_time = angel::util::get_cur_time_ms();
+    int timeout = getElectionTimeout();
     // 用于为客户端重定向到领导人
     std::string recent_leader;
     // 生成快照和接收快照时使用的临时文件

@@ -18,11 +18,13 @@ struct election_timeout_info {
 };
 
 struct rconf {
+    node_info self;
     std::vector<node_info> nodes;
     election_timeout_info election_timeout;
     int heartbeat_period = 100;
     int server_cron_period = 100;
     int snapshot_threshold = 100;
+    bool learner = false;
     std::string confile;
     std::string statefile;
     std::string snapshot;

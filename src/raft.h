@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <memory>
 
 #include <angel/server.h>
@@ -11,6 +12,7 @@
 
 #include "rpc.h"
 #include "logs.h"
+#include "config.h"
 #include "service.h"
 
 namespace raft {
@@ -44,20 +46,22 @@ public:
     // 在该日志条目被领导人执行后，会根据conn_id进行回复
     using Clients = std::unordered_map<size_t, size_t>;
 
-    ServerNode(angel::evloop *loop, angel::inet_addr listen_addr, const std::string& confile,
-            Service *service = new Service())
-        : loop(loop), server(loop, listen_addr), service(service)
+    ServerNode(angel::evloop *loop, const std::string& confile, Service *service = new Service())
+        : loop(loop), service(service)
     {
-        initServer(confile);
-        server.set_message_handler([this](const angel::connection_ptr& conn, angel::buffer& buf){
+        readConf(confile);
+        self_host = rconf.self.host;
+        server.reset(new angel::server(loop, angel::inet_addr(self_host)));
+        initServer();
+        server->set_message_handler([this](const angel::connection_ptr& conn, angel::buffer& buf){
                 this->process(conn, buf);
                 });
     }
     ~ServerNode() { saveState(); }
-    void start() { server.start(); }
+    void start() { server->start(); }
     void info(const char *fmt, ...);
 private:
-    void initServer(const std::string& confile);
+    void initServer();
     void serverCron();
 
     ServerEntry *getServerEntry(const std::string& host)
@@ -73,6 +77,15 @@ private:
     void processRpcAsLeader(const angel::connection_ptr& conn, rpc& r);
     void processRpcAsCandidate(const angel::connection_ptr& conn, rpc& r);
     void processRpcAsFollower(const angel::connection_ptr& conn, rpc& r);
+
+    void startConfigChange(std::string& config);
+    void commitConfigLogEntry();
+    void applyOldNewConfig();
+    void applyNewConfig();
+    void recvOldNewConfigLogEntry(const LogEntry& log);
+    void recvNewConfigLogEntry(const LogEntry& log);
+    void updateConfigFile();
+    void completeConfigChange();
 
     void sendLogEntry();
     void recvLogEntry(const angel::connection_ptr& conn, AppendEntry& ae);
@@ -119,20 +132,46 @@ private:
     size_t getMajority() { return (server_entries.size() + 1) / 2 + 1; }
 
     void updateRecentLeader(const std::string& leader_id);
+    void redirectToLeader(const angel::connection_ptr& conn);
 
     void sendReply(const angel::connection_ptr& conn, int type, bool success)
     {
         switch (type) {
         case AE_REPLY:
-            conn->format_send("AE_REPLY,%zu,%d\r\n", current_term, success);
+            conn->format_send("%s,%zu,%d\r\n", rpcts.ae_reply, current_term, success);
             break;
         case RV_REPLY:
-            conn->format_send("RV_REPLY,%zu,%d\r\n", current_term, success);
+            conn->format_send("%s,%zu,%d\r\n", rpcts.rv_reply, current_term, success);
             break;
         case IS_REPLY:
-            conn->format_send("IS_REPLY,%zu,%d\r\n", current_term, success);
+            conn->format_send("%s,%zu,%d\r\n", rpcts.is_reply, current_term, success);
             break;
         }
+    }
+
+    template <typename Set, typename First, typename Last>
+    void parseNodes(Set& set, First first, Last last)
+    {
+        auto p = last;
+        while (true) {
+            p = std::find(first, last, ',');
+            if (p == last) break;
+            set.emplace(std::string(first, p));
+            first = p + 1;
+        }
+        set.emplace(std::string(first, p));
+    }
+
+    size_t getOldMajority()
+    {
+        size_t majority = old_config_nodes.size() / 2;
+        return old_config_nodes.count(self_host) ? majority : majority + 1;
+    }
+
+    size_t getNewMajority()
+    {
+        size_t majority = new_config_nodes.size() / 2;
+        return new_config_nodes.count(self_host) ? majority : majority + 1;
     }
 
     // 在所有服务器上持久存在的
@@ -151,11 +190,19 @@ private:
     ////////////////////////////////////////////////////
     // 在领导人服务器上不稳定存在的（赢得选举之后初始化）
     ServerEntryMap server_entries;
+    // 新旧配置的节点(集群配置变更时使用)
+    std::unordered_set<std::string> new_config_nodes;
+    std::unordered_set<std::string> old_config_nodes;
+    // 分别收到了新旧配置节点各多少票
+    size_t new_votes = 0;
+    size_t old_votes = 0;
+    enum { OLD_NEW_CONFIG = 1, NEW_CONFIG };
+    int config_change_state = 0;
     ////////////////////////////////////////////////////
-    // 具体实现需要的一些数据
     Role role = FOLLOWER;
     angel::evloop *loop;
-    angel::server server;
+    std::unique_ptr<angel::server> server;
+    std::string self_host;
     // leader在接收客户端命令和回复响应时使用
     Clients clients;
     // 选举超时计时器和心跳计时器的id

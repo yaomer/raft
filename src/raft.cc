@@ -1,9 +1,9 @@
 #include "raft.h"
-#include "config.h"
 #include "util.h"
 
 #include <iostream>
 #include <random>
+#include <algorithm>
 
 #include <time.h>
 #include <fcntl.h>
@@ -16,12 +16,22 @@
 
 using namespace raft;
 
-void ServerNode::initServer(const std::string& confile)
+struct LogType {
+    // 普通用户命令日志
+    static const unsigned char cmd = '$';
+    // no-op日志
+    static const unsigned char noop = '@';
+    // 配置变更日志
+    // Cold,new
+    static const unsigned char old_new_config = '0';
+    // Cnew
+    static const unsigned char new_config = '1';
+} logtype;
+
+void ServerNode::initServer()
 {
-    rconf.confile = confile;
     run_id = generateRunid();
     info("my runid is %s", run_id.c_str());
-    readConf(rconf.confile);
     connectNodes();
     setPaths();
     loadState();
@@ -33,8 +43,11 @@ void ServerNode::initServer(const std::string& confile)
 void ServerNode::connectNodes()
 {
     for (auto& node : rconf.nodes) {
-        if (node.host == server.listen_addr().to_host())
+        if (node.host == self_host)
             continue;
+        if (server_entries.count(node.host)) {
+            log_fatal("The cluster contains duplicate nodes");
+        }
         auto se = new ServerEntry(loop, angel::inet_addr(node.host));
         se->start(this);
         server_entries.emplace(node.host, se);
@@ -63,19 +76,77 @@ void ServerNode::process(const angel::connection_ptr& conn, angel::buffer& buf)
             if (role == LEADER) {
                 std::string cmd(buf.peek() + 6, crlf - 6);
                 if (!cmd.empty()) {
+                    cmd.append(1, logtype.cmd);
                     logs.append(current_term, cmd);
                     info("append a new log[%zu](%zu)", logs.end() - 1, current_term);
                     clients.emplace(logs.end() - 1, conn->id());
                     sendLogEntry();
                 }
             } else { // 重定向
-                conn->format_send("<host>%s\r\n", recent_leader.c_str());
+                redirectToLeader(conn);
             }
             buf.retrieve(crlf + 2);
-        } else { // 内部通信
+        } else if (buf.starts_with("<config>")) { // 集群配置变更
+            if (role == LEADER) {
+                std::string config(buf.peek() + 8, crlf - 8);
+                startConfigChange(config);
+            } else {
+                redirectToLeader(conn);
+            }
+            buf.retrieve(crlf + 2);
+        } else if (buf.starts_with(rpcts.inter)){ // 内部通信
             r.parse(buf, crlf);
             if (r.gettype() == NONE) break;
             processrpc(conn, r);
+        } else {
+            conn->send("Please input <user>msg\\r\\n\n");
+            buf.retrieve(crlf + 2);
+        }
+    }
+}
+
+void ServerNode::startConfigChange(std::string& config)
+{
+    if (config.empty()) return;
+    if (config_change_state) return;
+    parseNodes(new_config_nodes, config.begin(), config.end());
+    info("recvd new config <%s>", config.c_str());
+    info("start member change");
+    // 复制一份旧配置节点
+    // 为了方便判断Cold,new日志是否在新旧配置中都达到了多数派
+    std::string old_new_log;
+    old_new_log.append(self_host).append(",");
+    old_config_nodes.emplace(self_host);
+    for (const auto& [host, serv] : server_entries) {
+        old_config_nodes.emplace(host);
+        old_new_log.append(host).append(",");
+    }
+    // 提交一条Cold,new日志
+    old_new_log.back() = ';';
+    old_new_log.append(config);
+    old_new_log.append(1, logtype.old_new_config);
+    logs.append(current_term, old_new_log);
+    info("append a Cold,new log[%zu](%zu) <%s>", logs.end() - 1, current_term, old_new_log.c_str());
+    config_change_state = OLD_NEW_CONFIG;
+    // 同步到使用新旧配置的所有节点上
+    applyOldNewConfig();
+    sendLogEntry();
+}
+
+void ServerNode::applyOldNewConfig()
+{
+    std::vector<std::string> old_new_nodes;
+    std::vector<std::string> old_nodes(old_config_nodes.begin(), old_config_nodes.end());
+    std::vector<std::string> new_nodes(new_config_nodes.begin(), new_config_nodes.end());
+    std::sort(old_nodes.begin(), old_nodes.end());
+    std::sort(new_nodes.begin(), new_nodes.end());
+    std::set_union(old_nodes.begin(), old_nodes.end(), new_nodes.begin(), new_nodes.end(),
+            std::back_inserter(old_new_nodes));
+    for (const auto& host : old_new_nodes) {
+        if (host != self_host && !server_entries.count(host)) {
+            auto se = new ServerEntry(loop, angel::inet_addr(host));
+            se->start(this);
+            server_entries.emplace(host, se);
         }
     }
 }
@@ -112,8 +183,8 @@ void ServerNode::sendLogEntry(ServerEntry *serv)
         if (prev_log_index < logs.baseIndex()) prev_log_term = last_included_term;
         else prev_log_term = logs[prev_log_index].term;
     }
-    conn->format_send("AE_RPC,%zu,%s,%zu,%zu,%zu,%zu\r\n", current_term, run_id.c_str(),
-            prev_log_index, prev_log_term, commit_index, buffer.size());
+    conn->format_send("%s,%zu,%s,%zu,%zu,%zu,%zu\r\n", rpcts.ae_rpc, current_term,
+            run_id.c_str(), prev_log_index, prev_log_term, commit_index, buffer.size());
     conn->send(buffer);
 }
 
@@ -163,13 +234,16 @@ void ServerNode::applyLogEntry()
     while (last_applied < commit_index) {
         // 此时[last_applied, commit_index)之间的所有日志条目都可以被应用到状态机
         auto& apply_log = logs[last_applied];
-        if (apply_log.cmd != "")
+        if (apply_log.cmd.back() == logtype.cmd) {
+            apply_log.cmd.pop_back();
             service->apply(apply_log.cmd);
+            apply_log.cmd.append(1, logtype.cmd);
+        }
         info("log[%zu](%zu) is applied to the state machine", last_applied, apply_log.term);
         if (role == LEADER) { // 回复客户端
             auto it = clients.find(last_applied);
             if (it != clients.end()) {
-                auto conn = server.get_connection(it->second);
+                auto conn = server->get_connection(it->second);
                 if (conn && conn->is_connected())
                     conn->send(service->reply());
                 clients.erase(it);
@@ -203,6 +277,10 @@ void ServerNode::sendLogEntrySuccessfully(const angel::connection_ptr& conn)
     // 只有领导人当前任期的日志条目才能通过计算复制数目来进行提交
     // 否则可能会出现：一条复制到了大多数服务器上的日志(还没提交)被新任领导人覆盖掉
     //
+    if (config_change_state) {
+        commitConfigLogEntry();
+        return;
+    }
     std::unordered_map<size_t, int> commit_map;
     for (auto& serv : server_entries) {
         commit_map[serv.second->match_index]++;
@@ -226,6 +304,112 @@ void ServerNode::sendLogEntryFail(const angel::connection_ptr& conn)
     sendLogEntry(it->second.get());
 }
 
+// Cold,new阶段，一条日志需要同时被新旧配置的多数派节点接收才能被提交
+// Cnew阶段，只需要被新配置的多数派节点接收即可
+void ServerNode::commitConfigLogEntry()
+{
+    std::unordered_map<size_t, int> commit_map;
+    if (config_change_state == OLD_NEW_CONFIG) {
+        for (auto& serv : server_entries) {
+            if (old_config_nodes.count(serv.first)) {
+                commit_map[serv.second->match_index]++;
+            }
+        }
+        bool old_commit = false;
+        size_t old_majority = getOldMajority();
+        for (auto& [n, commits] : commit_map) {
+            if (n <= commit_index) continue;
+            if (commits >= old_majority && logs[n - 1].term == current_term) {
+                old_commit = true;
+                break;
+            }
+        }
+        if (!old_commit) return;
+        commit_map.clear();
+    }
+    for (auto& serv : server_entries) {
+        if (new_config_nodes.count(serv.first)) {
+            commit_map[serv.second->match_index]++;
+        }
+    }
+    size_t new_majority = getNewMajority();
+    for (auto& [n, commits] : commit_map) {
+        if (n <= commit_index) continue;
+        if (commits >= new_majority && logs[n - 1].term == current_term) {
+            commit_index = n;
+            break;
+        }
+    }
+    if (config_change_state == OLD_NEW_CONFIG) {
+        // 提交一条Cnew日志
+        // (Cold,new中已经携带了相关配置信息)
+        std::string config(1, logtype.new_config);
+        logs.append(current_term, config);
+        config_change_state = NEW_CONFIG;
+        info("append a Cnew log[%zu](%zu)", logs.end() - 1, current_term);
+        sendLogEntry();
+    } else {
+        applyNewConfig();
+        completeConfigChange();
+    }
+}
+
+void ServerNode::applyNewConfig()
+{
+    // 移除不在新配置中的节点
+    for (auto it = server_entries.begin(); it != server_entries.end(); ) {
+        if (!new_config_nodes.count(it->first)) {
+            it = server_entries.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void ServerNode::updateConfigFile()
+{
+    char buf[1024];
+    bool update = false;
+    FILE *fp = fopen(rconf.confile.c_str(), "r");
+    auto tmpfile = getTmpFile();
+    int fd = open(tmpfile.c_str(), O_RDWR | O_CREAT, 0644);
+    while (fgets(buf, sizeof(buf), fp)) {
+        if (strlen(buf) >= 4 && strncmp(buf, "node", 4) == 0) {
+            if (update) continue;
+            for (auto& host : new_config_nodes) {
+                std::string line("node ");
+                auto p = std::find(host.begin(), host.end(), ':');
+                std::string ip(host.begin(), p);
+                std::string port(p + 1, host.end());
+                line.append(ip).append(" ").append(port).append("\n");
+                write(fd, line.data(), line.size());
+            }
+            update = true;
+        } else {
+            write(fd, buf, strlen(buf));
+        }
+    }
+    fclose(fp);
+    fsync(fd);
+    close(fd);
+    rename(tmpfile.c_str(), rconf.confile.c_str());
+}
+
+void ServerNode::completeConfigChange()
+{
+    info("cluster member change completed");
+    // 不在新配置中的节点就可以退出了
+    if (!new_config_nodes.count(self_host)) {
+        info("I'm not in the new configuration, ready to quit...");
+        server_entries.clear();
+        loop->quit();
+    }
+    updateConfigFile();
+    old_config_nodes.clear();
+    new_config_nodes.clear();
+    config_change_state = 0;
+}
+
 void ServerNode::processRpcAsCandidate(const angel::connection_ptr& conn, rpc& r)
 {
     switch (r.gettype()) {
@@ -238,9 +422,20 @@ void ServerNode::processRpcAsCandidate(const angel::connection_ptr& conn, rpc& r
         updateLastRecvHeartbeatTime();
         break;
     case RV_REPLY:
-        // 统计票数，如果获得大多数服务器的投票，则当选为新的领导人
-        if (r.reply().success && ++votes >= getMajority()) {
-            becomeNewLeader();
+        if (!r.reply().success) break;
+        if (config_change_state == OLD_NEW_CONFIG) {
+            // 需要同时获得新旧配置的多数派的投票才行
+            auto host = conn->get_peer_addr().to_host();
+            if (old_config_nodes.count(host)) old_votes++;
+            if (new_config_nodes.count(host)) new_votes++;
+            if (old_votes >= getOldMajority() && new_votes >= getNewMajority()) {
+                becomeNewLeader();
+            }
+        } else {
+            // 统计票数，如果获得大多数服务器的投票，则当选为新的领导人
+            if (++votes >= getMajority()) {
+                becomeNewLeader();
+            }
         }
         break;
     }
@@ -258,13 +453,15 @@ void ServerNode::becomeNewLeader()
     }
     // 提交一条空操作日志
     // (为了知道哪些日志是已被提交的，以及尝试提交之前还未被提交的日志)
-    logs.append(current_term, "");
+    std::string noop(1, logtype.noop);
+    logs.append(current_term, noop);
     info("append an empty log[%zu](%zu)", logs.end() - 1, current_term);
     sendLogEntry();
 }
 
 void ServerNode::processRpcAsFollower(const angel::connection_ptr& conn, rpc& r)
 {
+    if (rconf.learner) rconf.learner = false;
     switch (r.gettype()) {
     case AE_RPC: recvLogEntry(conn, r.ae()); break;
     case RV_RPC: votedForCandidate(conn, r.rv()); break;
@@ -307,6 +504,14 @@ void ServerNode::recvLogEntry(const angel::connection_ptr& conn, AppendEntry& ae
         // 追加新日志
         logs.append(log.term, log.cmd);
         info("append a new log[%zu](%zu)", logs.end() - 1, log.term);
+        switch (log.cmd.back()) {
+        case logtype.old_new_config:
+            recvOldNewConfigLogEntry(log);
+            break;
+        case logtype.new_config:
+            recvNewConfigLogEntry(log);
+            break;
+        }
 next:
         if (ae.prev_log_term > 0) ae.prev_log_index++;
         ae.prev_log_term = log.term;
@@ -316,6 +521,25 @@ next:
     return;
 fail:
     sendReply(conn, AE_REPLY, false);
+}
+
+void ServerNode::recvOldNewConfigLogEntry(const LogEntry& log)
+{
+    auto s = log.cmd.begin();
+    auto es = log.cmd.end() - 1;
+    auto p = std::find(s, es, ';');
+    parseNodes(old_config_nodes, s, p);
+    parseNodes(new_config_nodes, p + 1, es);
+    applyOldNewConfig();
+    info("recvd a Cold,new log[%zu](%zu) <%s>", logs.end() - 1, log.term, log.cmd.c_str());
+    config_change_state = OLD_NEW_CONFIG;
+}
+
+void ServerNode::recvNewConfigLogEntry(const LogEntry& log)
+{
+    info("recvd a Cnew log[%zu](%zu)", logs.end() - 1, log.term);
+    applyNewConfig();
+    completeConfigChange();
 }
 
 void ServerNode::updateCommitIndex(AppendEntry& ae)
@@ -385,7 +609,9 @@ void ServerNode::clearFollowerInfo()
 
 void ServerNode::serverCron()
 {
-    if (role == FOLLOWER) {
+    if (rconf.learner) {
+        updateLastRecvHeartbeatTime();
+    } else if (role == FOLLOWER) {
         auto now = angel::util::get_cur_time_ms();
         if (now - last_recv_heartbeat_time > rconf.election_timeout.base + rconf.election_timeout.range) {
             startLeaderElection();
@@ -420,7 +646,7 @@ void ServerNode::sendHeartBeat()
         if (serv.second->client->is_connected()) {
             auto& conn = serv.second->client->conn();
             // 目前HB_RPC并没有用到prev_log_index和prev_log_term
-            conn->format_send("HB_RPC,%zu,%s,%zu,%zu,%zu\r\n",
+            conn->format_send("%s,%zu,%s,%zu,%zu,%zu\r\n", rpcts.hb_rpc,
                     current_term, run_id.c_str(), 0, 0, commit_index);
         }
     }
@@ -438,6 +664,9 @@ void ServerNode::startLeaderElection()
     ++current_term;
     voted_for = run_id;
     votes = 1; // 先给自己投上一票
+    if (config_change_state == OLD_NEW_CONFIG) {
+        old_votes = new_votes = 0;
+    }
     info("start %zuth leader election", current_term);
     setElectionTimer();
     requestServersToVote();
@@ -465,7 +694,7 @@ void ServerNode::requestServersToVote()
     for (auto& serv : server_entries) {
         if (serv.second->client->is_connected()) {
             auto& conn = serv.second->client->conn();
-            conn->format_send("RV_RPC,%zu,%s,%zu,%zu\r\n",
+            conn->format_send("%s,%zu,%s,%zu,%zu\r\n", rpcts.rv_rpc,
                     current_term, run_id.c_str(), last_log_index, logs.lastTerm());
         }
     }
@@ -567,8 +796,8 @@ void ServerNode::sendSnapshot(const angel::connection_ptr& conn)
         size_t size = chunks[i];
         bool done = i == chunks.size() - 1 ? true : false;
         void *start = mmap(nullptr, size, PROT_READ, MAP_SHARED, fd, offset);
-        conn->format_send("IS_RPC,%zu,%s,%zu,%zu,%zu,%d,%zu\r\n", current_term, run_id.c_str(),
-                last_included_index, last_included_term, offset, done, size);
+        conn->format_send("%s,%zu,%s,%zu,%zu,%zu,%d,%zu\r\n", rpcts.is_rpc, current_term,
+                run_id.c_str(), last_included_index, last_included_term, offset, done, size);
         conn->send(start, size);
         munmap(start, size);
         offset += size;
@@ -614,12 +843,17 @@ void ServerNode::loadSnapshot()
 
 std::string ServerNode::generateRunid()
 {
-    return server.listen_addr().to_host();
+    return self_host;
 }
 
 void ServerNode::updateRecentLeader(const std::string& leader_id)
 {
     recent_leader = leader_id;
+}
+
+void ServerNode::redirectToLeader(const angel::connection_ptr& conn)
+{
+    conn->format_send("<host>%s\r\n", recent_leader.c_str());
 }
 
 void ServerEntry::start(ServerNode *self)

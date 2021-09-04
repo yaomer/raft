@@ -87,6 +87,19 @@ private:
     rpcmsg msg;
 };
 
+struct RpcTypeString {
+    static constexpr const char *inter = "<internal>";
+    static constexpr const char *ae_rpc = "<internal>AE_RPC";
+    static constexpr const char *rv_rpc = "<internal>RV_RPC";
+    static constexpr const char *hb_rpc = "<internal>HB_RPC";
+    static constexpr const char *is_rpc = "<internal>IS_RPC";
+    static constexpr const char *ae_reply = "<internal>AE_REPLY";
+    static constexpr const char *rv_reply = "<internal>RV_REPLY";
+    static constexpr const char *is_reply = "<internal>IS_REPLY";
+};
+
+extern struct RpcTypeString rpcts;
+
 }
 
 #endif // _RAFT_SRC_RPC_H

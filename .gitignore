@@ -5,3 +5,4 @@ run.sh
 rlog/
 cli
 build/
+800*.conf

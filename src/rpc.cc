@@ -6,6 +6,7 @@
 namespace raft {
 
 // ==================================================================================================
+// [RPC] [<internal>AE_RPC|RV_RPC|HB_RPC|IS_RPC|AE_REPLY|RV_REPLY|IS_REPLY]
 // [AE_RPC] [AE_RPC,leader_term,leader_id,prev_log_index,prev_log_term,leader_commit,logsize\r\n<logs>]
 // <logs> <[items][log1][log2]...>
 // [RV_RPC] [RV_RPC,candidate_term,candidate_id,last_log_index,last_log_term\r\n]
@@ -13,7 +14,10 @@ namespace raft {
 // [IS_RPC] [IS_RPC,leader_term,leader_id,last_included_index,last_included_term,offset,done,datasize\r\n<data>]
 // [AE_REPLY] [AE_REPLY,term,success\r\n]
 // [RV_REPLY] [RV_REPLY,term,success\r\n]
+// [IS_REPLY] [IS_REPLY,term,success\r\n](ignore success)
 // ==================================================================================================
+
+struct RpcTypeString rpcts;
 
 static int getrpctype(const std::string& type)
 {
@@ -46,8 +50,8 @@ static std::vector<size_t> split(const char *s, const char *es, char c)
 
 void rpc::parse(angel::buffer& buf, int crlf)
 {
-    const char *s = buf.peek();
-    const char *es = s + crlf;
+    const char *s = buf.peek() + strlen(rpcts.inter);
+    const char *es = buf.peek() + crlf;
     const char *p = std::find(s, es, ',');
     type = getrpctype(std::string(s, p));
     if (type == NONE) return;

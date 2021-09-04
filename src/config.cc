@@ -1,7 +1,10 @@
 #include "config.h"
 
 #include <assert.h>
+
 #include <iostream>
+
+#include <angel/logger.h>
 
 namespace raft {
 
@@ -15,8 +18,7 @@ static Paramlist parseConf(const char *confile)
     char buf[1024];
     FILE *fp = fopen(confile, "r");
     if (!fp) {
-        printf("can't open %s\n", confile);
-        abort();
+        log_fatal("can't open %s", confile);
     }
     Paramlist paramlist;
     while (fgets(buf, sizeof(buf), fp)) {
@@ -40,9 +42,12 @@ static Paramlist parseConf(const char *confile)
 
 void readConf(const std::string& confile)
 {
+    rconf.confile = confile;
     auto paramlist = parseConf(confile.c_str());
     for (auto& param : paramlist) {
-        if (param[0].compare("node") == 0) {
+        if (param[0].compare("self") == 0) {
+            rconf.self.host = param[1] + ":" + param[2];
+        } else if (param[0].compare("node") == 0) {
             node_info node;
             node.host = param[1] + ":" + param[2];
             rconf.nodes.emplace_back(node);
@@ -55,10 +60,14 @@ void readConf(const std::string& confile)
             rconf.server_cron_period = stoi(param[1]);
         } else if (param[0].compare("snapshot_threshold") == 0) {
             rconf.snapshot_threshold = stoi(param[1]);
+        } else if (param[0].compare("learner") == 0) {
+            rconf.learner = stoi(param[1]);
         } else {
-            printf("error: option<%s> unknown\n", param[0].c_str());
-            abort();
+            log_fatal("unknown option<%s>", param[0].c_str());
         }
+    }
+    if (rconf.self.host.empty()) {
+        log_fatal("You must have the <self> option");
     }
 }
 

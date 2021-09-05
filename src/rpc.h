@@ -27,6 +27,7 @@ enum RpcType {
     IS_RPC,
     AE_REPLY,
     RV_REPLY,
+    HB_REPLY,
     IS_REPLY,
 };
 
@@ -95,6 +96,7 @@ struct RpcTypeString {
     static constexpr const char *is_rpc = "<internal>IS_RPC";
     static constexpr const char *ae_reply = "<internal>AE_REPLY";
     static constexpr const char *rv_reply = "<internal>RV_REPLY";
+    static constexpr const char *hb_reply = "<internal>HB_REPLY";
     static constexpr const char *is_reply = "<internal>IS_REPLY";
 };
 

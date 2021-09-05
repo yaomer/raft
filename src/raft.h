@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <memory>
+#include <map>
 
 #include <angel/server.h>
 #include <angel/client.h>
@@ -36,6 +37,8 @@ struct ServerEntry {
     size_t next_index = 0;  // 发送给该服务器的下一条日志条目的索引
     // match_index=1表示logs[0]已经复制到该服务器上了
     size_t match_index = 0; // 已经复制到该服务器上的最大日志的索引+1
+    // 该服务器响应了多少次ReadIndex的心跳
+    size_t read_index_heartbeat_replies = 0;
 };
 
 class ServerNode {
@@ -64,12 +67,6 @@ private:
     void initServer();
     void serverCron();
 
-    ServerEntry *getServerEntry(const std::string& host)
-    {
-        auto it = server_entries.find(host);
-        return it != server_entries.end() ? it->second.get() : nullptr;
-    }
-
     void process(const angel::connection_ptr& conn, angel::buffer& buf);
     void processRpcFromServer(const angel::connection_ptr& conn, angel::buffer& buf);
     void processrpc(const angel::connection_ptr& conn, rpc& r);
@@ -95,6 +92,10 @@ private:
     void rollbackOldConfig();
     void recvOldConfigLogEntry(const LogEntry& log);
 
+    void startReadIndex(size_t id, const std::string& cmd);
+    void applyReadIndex();
+    void applyReadIndex(size_t id, const std::string& cmd);
+
     void sendLogEntry();
     void recvLogEntry(const angel::connection_ptr& conn, AppendEntry& ae);
     void votedForCandidate(const angel::connection_ptr& conn, RequestVote& rv);
@@ -103,7 +104,7 @@ private:
     void sendLogEntryFail(const angel::connection_ptr& conn);
 
     void setHeartBeatTimer();
-    void sendHeartBeat();
+    void sendHeartBeat(int type);
     void cancelHeartBeatTimer();
 
     void startLeaderElection();
@@ -152,6 +153,9 @@ private:
         case RV_REPLY:
             conn->format_send("%s,%zu,%d\r\n", rpcts.rv_reply, current_term, success);
             break;
+        case HB_REPLY:
+            conn->format_send("%s,%zu,%d\r\n", rpcts.hb_reply, current_term, success);
+            break;
         case IS_REPLY:
             conn->format_send("%s,%zu,%d\r\n", rpcts.is_reply, current_term, success);
             break;
@@ -196,6 +200,13 @@ private:
     size_t commit_index = 0;    // 已被提交的最大日志条目的索引
     // last_applied=1表示logs[0]已被应用到状态机了
     size_t last_applied = 0;    // 被状态机执行的最大日志条目的索引
+    // ReadIndex Read
+    // <commit_index, <conn_id, req_cmd>>
+    std::map<size_t, std::vector<std::pair<size_t, std::string>>> read_map;
+    // 是否可以应用ReadIndex
+    bool apply_read_index = true;
+    // 为ReadIndex发送了多少次心跳
+    size_t read_index_heartbeats = 0;
     ////////////////////////////////////////////////////
     // 在领导人服务器上不稳定存在的（赢得选举之后初始化）
     ServerEntryMap server_entries;

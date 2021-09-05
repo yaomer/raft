@@ -14,6 +14,7 @@ namespace raft {
 // [IS_RPC] [IS_RPC,leader_term,leader_id,last_included_index,last_included_term,offset,done,datasize\r\n<data>]
 // [AE_REPLY] [AE_REPLY,term,success\r\n]
 // [RV_REPLY] [RV_REPLY,term,success\r\n]
+// [HB_REPLY] [HB_REPLY,term,success\r\n](used for ReadIndex)(ignore success)
 // [IS_REPLY] [IS_REPLY,term,success\r\n](ignore success)
 // ==================================================================================================
 
@@ -28,6 +29,7 @@ static int getrpctype(const std::string& type)
         { "IS_RPC", IS_RPC },
         { "AE_REPLY", AE_REPLY },
         { "RV_REPLY", RV_REPLY },
+        { "HB_REPLY", HB_REPLY },
         { "IS_REPLY", IS_REPLY },
     };
     return typemap.count(type) ? typemap[type] : NONE;
@@ -149,7 +151,10 @@ void rpc::parse(angel::buffer& buf, int crlf)
         msg = snapshot;
         break;
     }
-    case AE_REPLY: case RV_REPLY: case IS_REPLY: {
+    case AE_REPLY:
+    case RV_REPLY:
+    case HB_REPLY:
+    case IS_REPLY: {
         Reply reply;
         ts.assign(p, p + indexs[0]);
         reply.term = stoul(ts);
@@ -171,7 +176,10 @@ size_t rpc::getterm()
         return rv().candidate_term;
     case IS_RPC:
         return snapshot().leader_term;
-    case AE_REPLY: case RV_REPLY: case IS_REPLY:
+    case AE_REPLY:
+    case RV_REPLY:
+    case HB_REPLY:
+    case IS_REPLY:
         return reply().term;
     }
     return 0;

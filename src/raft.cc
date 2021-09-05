@@ -30,6 +30,11 @@ struct LogType {
     static const unsigned char old_config = 'o';
 } logtype;
 
+struct HeartBeatType {
+    static const int normal = 0;
+    static const int read_index = 1;
+} hbtype;
+
 void ServerNode::initServer()
 {
     run_id = generateRunid();
@@ -69,6 +74,26 @@ void ServerNode::setPaths()
     rconf.snapshot = pid;
 }
 
+// 要如何保证系统的线性一致性呢？
+// (所谓线性一致，简单理解，就是在t1时刻写入一个值，那么在t2时刻一定能读到它)
+//
+// 所有请求走一趟raft log，显然能够保证。
+// 但读请求不会改变状态机的状态，显然是不需要记录日志的。
+// 所以如果对每一个读请求都走一趟log，会显得很低效。
+//
+// 对于读请求，如果能够确定当前leader一定还是leader(没有被更大的term废除)
+// 那么我们就可以直接从当前leader读取数据，而不必再走一趟log(raft保证leader一定拥有最新数据)
+//
+// 所以对于如何确认自己当前还是leader，raft paper中提供了两种方法
+// 1. ReadIndex Read
+// 1) 记录自己当前的commit index
+// 2) 与其他节点交换一次心跳，如果能收到大多数节点的响应，就说明自己还是leader
+// 3) 等待apply index超过commit index
+// 4) 执行对应的读请求
+// *) 这里有一个corner case需要注意，在leader当选后提交的no-op日志还没有提交前，
+// 是不能提供ReadIndex的。因为no-op提交后才能保证leader拥有已提交的所有日志，
+// 即保证commit index是最新的。
+
 void ServerNode::process(const angel::connection_ptr& conn, angel::buffer& buf)
 {
     rpc r;
@@ -77,13 +102,20 @@ void ServerNode::process(const angel::connection_ptr& conn, angel::buffer& buf)
         if (crlf < 0) break;
         if (buf.starts_with("<user>")) { // 客户端的请求
             if (role == LEADER) {
-                std::string cmd(buf.peek() + 6, crlf - 6);
+                // <user><r>cmd\r\n <user>r get k
+                // <user><w>cmd\r\n <user>w set k v
+                unsigned char type = *(buf.peek() + 6);
+                std::string cmd(buf.peek() + 7, crlf - 7);
                 if (!cmd.empty()) {
-                    cmd.append(1, logtype.cmd);
-                    logs.append(current_term, cmd);
-                    info("append a new log[%zu](%zu)", logs.end() - 1, current_term);
-                    clients.emplace(logs.end() - 1, conn->id());
-                    sendLogEntry();
+                    if (type == 'r') { // 读请求
+                        startReadIndex(conn->id(), cmd);
+                    } else {
+                        cmd.append(1, logtype.cmd);
+                        logs.append(current_term, cmd);
+                        info("append a new log[%zu](%zu)", logs.end() - 1, current_term);
+                        clients.emplace(logs.end() - 1, conn->id());
+                        sendLogEntry();
+                    }
                 }
             } else { // 重定向
                 redirectToLeader(conn);
@@ -204,6 +236,14 @@ void ServerNode::rollbackOldConfig()
     info("cluster member change failed, rollback to the old configuration");
 }
 
+void ServerNode::startReadIndex(size_t id, const std::string& cmd)
+{
+    read_map[commit_index].emplace_back(id, cmd);
+    apply_read_index = false;
+    read_index_heartbeats++;
+    sendHeartBeat(hbtype.read_index);
+}
+
 void ServerNode::sendLogEntry()
 {
     for (auto& serv : server_entries) {
@@ -309,6 +349,44 @@ void ServerNode::applyLogEntry()
         }
         ++last_applied;
     }
+    applyReadIndex();
+}
+
+void ServerNode::applyReadIndex()
+{
+    // 未收到大多数节点的心跳响应
+    if (!apply_read_index) return;
+    // 节点还没有数据，正常情况不会出现
+    if (commit_index == 0 && logs.empty()) {
+        auto it = read_map.find(0);
+        if (it != read_map.end()) {
+            for (auto& [id, cmd] : it->second) {
+                applyReadIndex(id, cmd);
+            }
+        }
+        return;
+    }
+    if (commit_index == 0) return;
+    auto& commit_log = logs[commit_index - 1];
+    // no-op log还没有提交
+    if (commit_log.term != current_term) return;
+    while (!read_map.empty()) {
+        auto& [read_index, reqlist] = *read_map.begin();
+        if (read_index > last_applied) break;
+        for (auto& [id, cmd] : reqlist) {
+            applyReadIndex(id, cmd);
+        }
+        read_map.erase(read_index);
+    }
+}
+
+void ServerNode::applyReadIndex(size_t id, const std::string& cmd)
+{
+    auto conn = server->get_connection(id);
+    if (conn->is_connected()) {
+        service->apply(cmd);
+        conn->send(service->reply());
+    }
 }
 
 void ServerNode::processRpcAsLeader(const angel::connection_ptr& conn, rpc& r)
@@ -318,15 +396,36 @@ void ServerNode::processRpcAsLeader(const angel::connection_ptr& conn, rpc& r)
         if (r.reply().success) sendLogEntrySuccessfully(conn);
         else sendLogEntryFail(conn);
         break;
+    case HB_REPLY:
+        auto it = server_entries.find(conn->get_peer_addr().to_host());
+        if (it == server_entries.end()) {
+            log_error("%s not found in server_entries", conn->get_peer_addr().to_host());
+            break;
+        }
+        it->second->read_index_heartbeat_replies++;
+        size_t commits = 0;
+        for (auto& serv : server_entries) {
+            if (serv.second->read_index_heartbeat_replies == read_index_heartbeats) {
+                commits++;
+            }
+        }
+        // 如果收到了大多数节点的心跳响应，就说明自己还是leader
+        if (commits >= getMajority() - 1) {
+            apply_read_index = true;
+        }
+        break;
     }
 }
 
 void ServerNode::sendLogEntrySuccessfully(const angel::connection_ptr& conn)
 {
-    auto serv = getServerEntry(conn->get_peer_addr().to_host());
-    assert(serv);
-    serv->next_index = logs.end();
-    serv->match_index = serv->next_index;
+    auto it = server_entries.find(conn->get_peer_addr().to_host());
+    if (it == server_entries.end()) {
+        log_error("%s not found in server_entries", conn->get_peer_addr().to_host());
+        return;
+    }
+    it->second->next_index = logs.end();
+    it->second->match_index = it->second->next_index;
     // If there exists an N such that N > commitIndex,
     // a majority of matchIndex[i] ≥ N, and log[N].term == currentTerm:
     // set commitIndex = N
@@ -517,7 +616,10 @@ void ServerNode::becomeNewLeader()
     for (auto& serv : server_entries) {
         serv.second->next_index = logs.end();
         serv.second->match_index = 0;
+        serv.second->read_index_heartbeat_replies = 0;
     }
+    apply_read_index = false;
+    read_index_heartbeats = 0;
     // 提交一条空操作日志
     // (为了知道哪些日志是已被提交的，以及尝试提交之前还未被提交的日志)
     std::string noop(1, logtype.noop);
@@ -540,6 +642,8 @@ void ServerNode::processRpcAsFollower(const angel::connection_ptr& conn, rpc& r)
         updateRecentLeader(r.ae().leader_id);
         updateLastRecvHeartbeatTime();
         updateCommitIndex(r.ae());
+        if (r.ae().prev_log_term == hbtype.read_index)
+            sendReply(conn, HB_REPLY, true);
         break;
     }
 }
@@ -723,18 +827,17 @@ void ServerNode::serverCron()
 void ServerNode::setHeartBeatTimer()
 {
     heartbeat_timer_id = loop->run_every(rconf.heartbeat_period, [this]{
-            this->sendHeartBeat();
+            this->sendHeartBeat(hbtype.normal);
             });
 }
 
-void ServerNode::sendHeartBeat()
+void ServerNode::sendHeartBeat(int type)
 {
     for (auto& serv : server_entries) {
         if (serv.second->client->is_connected()) {
             auto& conn = serv.second->client->conn();
-            // 目前HB_RPC并没有用到prev_log_index和prev_log_term
             conn->format_send("%s,%zu,%s,%zu,%zu,%zu\r\n", rpcts.hb_rpc,
-                    current_term, run_id.c_str(), 0, 0, commit_index);
+                    current_term, run_id.c_str(), 0, type, commit_index);
         }
     }
 }
@@ -950,13 +1053,11 @@ void ServerNode::redirectToLeader(const angel::connection_ptr& conn)
 
 void ServerEntry::start(ServerNode *self)
 {
-    client->set_connection_handler([self](const angel::connection_ptr& conn){
+    client->set_connection_handler([self, this](const angel::connection_ptr& conn){
             self->info("### connect with server %s", conn->get_peer_addr().to_host());
             // 尝试补发缺失的日志
             if (self->role == LEADER) {
-                auto serv = self->getServerEntry(conn->get_peer_addr().to_host());
-                assert(serv);
-                self->sendLogEntry(serv);
+                self->sendLogEntry(this);
             }
             });
     client->set_message_handler([self](const angel::connection_ptr& conn, angel::buffer& buf){

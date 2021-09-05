@@ -39,6 +39,7 @@ struct ServerEntry {
     size_t match_index = 0; // 已经复制到该服务器上的最大日志的索引+1
     // 该服务器响应了多少次ReadIndex的心跳
     size_t read_index_heartbeat_replies = 0;
+    size_t normal_heartbeat_replies = 0;
 };
 
 class ServerNode {
@@ -54,6 +55,7 @@ public:
     {
         readConf(confile);
         self_host = rconf.self.host;
+        timeout = getElectionTimeout();
         server.reset(new angel::server(loop, angel::inet_addr(self_host)));
         initServer();
         server->set_message_handler([this](const angel::connection_ptr& conn, angel::buffer& buf){
@@ -74,6 +76,9 @@ private:
     void processRpcAsLeader(const angel::connection_ptr& conn, rpc& r);
     void processRpcAsCandidate(const angel::connection_ptr& conn, rpc& r);
     void processRpcAsFollower(const angel::connection_ptr& conn, rpc& r);
+
+    void processUserRequest(const angel::connection_ptr& conn, std::string& cmd, int type);
+    void normalAppendLogEntry(std::string& cmd, size_t id);
 
     void startConfigChange(std::string& config);
     void commitConfigLogEntry();
@@ -96,12 +101,15 @@ private:
     void applyReadIndex();
     void applyReadIndex(size_t id, const std::string& cmd);
 
+    void startLeaseRead(size_t id, const std::string& cmd);
+
     void sendLogEntry();
     void recvLogEntry(const angel::connection_ptr& conn, AppendEntry& ae);
     void votedForCandidate(const angel::connection_ptr& conn, RequestVote& rv);
 
     void sendLogEntrySuccessfully(const angel::connection_ptr& conn);
     void sendLogEntryFail(const angel::connection_ptr& conn);
+    void recvHeartbeatReply(const angel::connection_ptr& conn, Reply& reply);
 
     void setHeartBeatTimer();
     void sendHeartBeat(int type);
@@ -207,6 +215,9 @@ private:
     bool apply_read_index = true;
     // 为ReadIndex发送了多少次心跳
     size_t read_index_heartbeats = 0;
+    // Lease Read
+    int64_t lease_expire_time;
+    size_t normal_heartbeats = 0;
     ////////////////////////////////////////////////////
     // 在领导人服务器上不稳定存在的（赢得选举之后初始化）
     ServerEntryMap server_entries;
@@ -231,7 +242,7 @@ private:
     size_t heartbeat_timer_id = 0;
     // 最后一次收到心跳包的时间戳(ms)
     int64_t last_recv_heartbeat_time = angel::util::get_cur_time_ms();
-    int timeout = getElectionTimeout();
+    int timeout;
     // 用于为客户端重定向到领导人
     std::string recent_leader;
     // 生成快照和接收快照时使用的临时文件

@@ -23,6 +23,8 @@ struct rconf {
     election_timeout_info election_timeout;
     int heartbeat_period = 100;
     int snapshot_threshold = 100;
+    bool use_read_index = true;
+    bool use_lease_read = false;
     bool learner = false;
     std::string confile;
     std::string statefile;

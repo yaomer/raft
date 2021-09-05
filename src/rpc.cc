@@ -14,7 +14,7 @@ namespace raft {
 // [IS_RPC] [IS_RPC,leader_term,leader_id,last_included_index,last_included_term,offset,done,datasize\r\n<data>]
 // [AE_REPLY] [AE_REPLY,term,success\r\n]
 // [RV_REPLY] [RV_REPLY,term,success\r\n]
-// [HB_REPLY] [HB_REPLY,term,success\r\n](used for ReadIndex)(ignore success)
+// [HB_REPLY] [HB_REPLY,term,success\r\n]
 // [IS_REPLY] [IS_REPLY,term,success\r\n](ignore success)
 // ==================================================================================================
 

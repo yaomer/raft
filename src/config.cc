@@ -58,6 +58,10 @@ void readConf(const std::string& confile)
             rconf.heartbeat_period = stoi(param[1]);
         } else if (param[0].compare("snapshot_threshold") == 0) {
             rconf.snapshot_threshold = stoi(param[1]);
+        } else if (param[0].compare("use_read_index") == 0) {
+            rconf.use_read_index = stoi(param[1]);
+        } else if (param[0].compare("use_lease_read") == 0) {
+            rconf.use_lease_read = stoi(param[1]);
         } else if (param[0].compare("learner") == 0) {
             rconf.learner = stoi(param[1]);
         } else {

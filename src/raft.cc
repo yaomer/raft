@@ -106,17 +106,7 @@ void ServerNode::process(const angel::connection_ptr& conn, angel::buffer& buf)
                 // <user><w>cmd\r\n <user>w set k v
                 unsigned char type = *(buf.peek() + 6);
                 std::string cmd(buf.peek() + 7, crlf - 7);
-                if (!cmd.empty()) {
-                    if (type == 'r') { // 读请求
-                        startReadIndex(conn->id(), cmd);
-                    } else {
-                        cmd.append(1, logtype.cmd);
-                        logs.append(current_term, cmd);
-                        info("append a new log[%zu](%zu)", logs.end() - 1, current_term);
-                        clients.emplace(logs.end() - 1, conn->id());
-                        sendLogEntry();
-                    }
-                }
+                processUserRequest(conn, cmd, type);
             } else { // 重定向
                 redirectToLeader(conn);
             }
@@ -138,6 +128,31 @@ void ServerNode::process(const angel::connection_ptr& conn, angel::buffer& buf)
             buf.retrieve(crlf + 2);
         }
     }
+}
+
+void ServerNode::processUserRequest(const angel::connection_ptr& conn, std::string& cmd, int type)
+{
+    if (cmd.empty()) return;
+    if (type == 'r') { // 读请求
+        if (rconf.use_read_index) {
+            startReadIndex(conn->id(), cmd);
+        } else if (rconf.use_lease_read) {
+            startLeaseRead(conn->id(), cmd);
+        } else {
+            normalAppendLogEntry(cmd, conn->id());
+        }
+    } else {
+        normalAppendLogEntry(cmd, conn->id());
+    }
+}
+
+void ServerNode::normalAppendLogEntry(std::string& cmd, size_t id)
+{
+    cmd.append(1, logtype.cmd);
+    logs.append(current_term, cmd);
+    info("append a new log[%zu](%zu)", logs.end() - 1, current_term);
+    clients.emplace(logs.end() - 1, id);
+    sendLogEntry();
 }
 
 void ServerNode::startConfigChange(std::string& config)
@@ -240,8 +255,13 @@ void ServerNode::startReadIndex(size_t id, const std::string& cmd)
 {
     read_map[commit_index].emplace_back(id, cmd);
     apply_read_index = false;
-    read_index_heartbeats++;
     sendHeartBeat(hbtype.read_index);
+    read_index_heartbeats++;
+}
+
+void ServerNode::startLeaseRead(size_t id, const std::string& cmd)
+{
+    read_map[commit_index].emplace_back(id, cmd);
 }
 
 void ServerNode::sendLogEntry()
@@ -354,8 +374,13 @@ void ServerNode::applyLogEntry()
 
 void ServerNode::applyReadIndex()
 {
-    // 未收到大多数节点的心跳响应
-    if (!apply_read_index) return;
+    if (rconf.use_read_index) {
+        // 未收到大多数节点的心跳响应
+        if (!apply_read_index) return;
+    } else if (rconf.use_lease_read) {
+        // 不在租期内
+        if (angel::util::get_cur_time_ms() >= lease_expire_time) return;
+    }
     // 节点还没有数据，正常情况不会出现
     if (commit_index == 0 && logs.empty()) {
         auto it = read_map.find(0);
@@ -397,13 +422,21 @@ void ServerNode::processRpcAsLeader(const angel::connection_ptr& conn, rpc& r)
         else sendLogEntryFail(conn);
         break;
     case HB_REPLY:
-        auto it = server_entries.find(conn->get_peer_addr().to_host());
-        if (it == server_entries.end()) {
-            log_error("%s not found in server_entries", conn->get_peer_addr().to_host());
-            break;
-        }
-        it->second->read_index_heartbeat_replies++;
+        recvHeartbeatReply(conn, r.reply());
+        break;
+    }
+}
+
+void ServerNode::recvHeartbeatReply(const angel::connection_ptr& conn, Reply& reply)
+{
+    auto it = server_entries.find(conn->get_peer_addr().to_host());
+    if (it == server_entries.end()) {
+        log_error("%s not found in server_entries", conn->get_peer_addr().to_host());
+        return;
+    }
+    if (reply.success) { // ReadIndex Read
         size_t commits = 0;
+        it->second->read_index_heartbeat_replies++;
         for (auto& serv : server_entries) {
             if (serv.second->read_index_heartbeat_replies == read_index_heartbeats) {
                 commits++;
@@ -413,7 +446,19 @@ void ServerNode::processRpcAsLeader(const angel::connection_ptr& conn, rpc& r)
         if (commits >= getMajority() - 1) {
             apply_read_index = true;
         }
-        break;
+    } else { // Lease Read
+        size_t commits = 0;
+        if (!rconf.use_lease_read) return;
+        it->second->normal_heartbeat_replies++;
+        for (auto& serv : server_entries) {
+            if (serv.second->normal_heartbeat_replies == normal_heartbeats) {
+                commits++;
+            }
+        }
+        if (commits >= getMajority() - 1) { // 延续租期
+            int lease_time = rconf.election_timeout.base / 2;
+            lease_expire_time = angel::util::get_cur_time_ms() + lease_time;
+        }
     }
 }
 
@@ -617,9 +662,12 @@ void ServerNode::becomeNewLeader()
         serv.second->next_index = logs.end();
         serv.second->match_index = 0;
         serv.second->read_index_heartbeat_replies = 0;
+        serv.second->normal_heartbeat_replies = 0;
     }
+    read_map.clear();
     apply_read_index = false;
     read_index_heartbeats = 0;
+    normal_heartbeats = 0;
     // 提交一条空操作日志
     // (为了知道哪些日志是已被提交的，以及尝试提交之前还未被提交的日志)
     std::string noop(1, logtype.noop);
@@ -642,8 +690,11 @@ void ServerNode::processRpcAsFollower(const angel::connection_ptr& conn, rpc& r)
         updateRecentLeader(r.ae().leader_id);
         updateLastRecvHeartbeatTime();
         updateCommitIndex(r.ae());
-        if (r.ae().prev_log_term == hbtype.read_index)
+        if (r.ae().prev_log_term == hbtype.read_index) {
             sendReply(conn, HB_REPLY, true);
+        } else {
+            sendReply(conn, HB_REPLY, false);
+        }
         break;
     }
 }
@@ -804,7 +855,7 @@ void ServerNode::serverCron()
         updateLastRecvHeartbeatTime();
     } else if (role == FOLLOWER) {
         auto now = angel::util::get_cur_time_ms();
-        if (now - last_recv_heartbeat_time > timeout) {
+        if (now - last_recv_heartbeat_time >= timeout) {
             startLeaderElection();
         }
     }
@@ -828,6 +879,7 @@ void ServerNode::setHeartBeatTimer()
 {
     heartbeat_timer_id = loop->run_every(rconf.heartbeat_period, [this]{
             this->sendHeartBeat(hbtype.normal);
+            this->normal_heartbeats++;
             });
 }
 
@@ -1058,6 +1110,8 @@ void ServerEntry::start(ServerNode *self)
             // 尝试补发缺失的日志
             if (self->role == LEADER) {
                 self->sendLogEntry(this);
+                this->read_index_heartbeat_replies = self->read_index_heartbeats;
+                this->normal_heartbeat_replies = self->normal_heartbeats;
             }
             });
     client->set_message_handler([self](const angel::connection_ptr& conn, angel::buffer& buf){

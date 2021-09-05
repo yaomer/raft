@@ -19,15 +19,24 @@ raft
   <td>✔️</td>
 </tr>
 <tr>
-  <th>ReadIndex</th>
-  <td>✔️</td>
-</tr>
-<tr>
   <th>状态机接口</th>
   <td>✔️</td>
 </tr>
 <tr>
   <th>客户端</th>
+  <td>✔️</td>
+</tr>
+</tbody>
+</table>
+
+<table>
+<tbody>
+<tr>
+  <th>Read Index</th>
+  <td>✔️</td>
+</tr>
+<tr>
+  <th>Lease Read</th>
   <td>✔️</td>
 </tr>
 </tbody>

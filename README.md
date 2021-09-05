@@ -19,6 +19,10 @@ raft
   <td>✔️</td>
 </tr>
 <tr>
+  <th>ReadIndex</th>
+  <td>✔️</td>
+</tr>
+<tr>
   <th>状态机接口</th>
   <td>✔️</td>
 </tr>

@@ -102,15 +102,11 @@ void ServerNode::process(const angel::connection_ptr& conn, angel::buffer& buf)
         if (crlf < 0) break;
         if (buf.starts_with("<user>")) { // 客户端的请求
             if (role == LEADER) {
-                // <user><r>cmd\r\n <user>r get k
-                // <user><w>cmd\r\n <user>w set k v
-                unsigned char type = *(buf.peek() + 6);
-                std::string cmd(buf.peek() + 7, crlf - 7);
-                processUserRequest(conn, cmd, type);
+                processUserRequest(conn, buf, crlf);
             } else { // 重定向
                 redirectToLeader(conn);
+                buf.retrieve(crlf + 2);
             }
-            buf.retrieve(crlf + 2);
         } else if (buf.starts_with("<config>")) { // 集群配置变更
             if (role == LEADER) {
                 std::string config(buf.peek() + 8, crlf - 8);
@@ -130,26 +126,57 @@ void ServerNode::process(const angel::connection_ptr& conn, angel::buffer& buf)
     }
 }
 
-void ServerNode::processUserRequest(const angel::connection_ptr& conn, std::string& cmd, int type)
+void ServerNode::processUserRequest(const angel::connection_ptr& conn, angel::buffer& buf, int crlf)
 {
+    // <user><r>cmd\r\n <user>r get k
+    // <user><w>cmd\r\n <user>w set k v
+    unsigned char type = *(buf.peek() + 6);
+    std::string cmd(buf.peek() + 7, crlf - 7);
     if (cmd.empty()) return;
     if (type == 'r') { // 读请求
         if (rconf.use_read_index) {
-            startReadIndex(conn->id(), cmd);
+            startReadIndex(conn->id(), std::move(cmd));
         } else if (rconf.use_lease_read) {
-            startLeaseRead(conn->id(), cmd);
+            startLeaseRead(conn->id(), std::move(cmd));
         } else {
-            normalAppendLogEntry(cmd, conn->id());
+            normalAppendLogEntry(conn->id(),  std::move(cmd));
         }
+        buf.retrieve(crlf + 2);
     } else {
-        normalAppendLogEntry(cmd, conn->id());
+        batchAppendLogEntry(conn, buf, crlf, std::move(cmd));
     }
 }
 
-void ServerNode::normalAppendLogEntry(std::string& cmd, size_t id)
+void ServerNode::batchAppendLogEntry(const angel::connection_ptr& conn, angel::buffer& buf,
+                                     int crlf, std::string&& cmd)
+{
+    WriteBatch batch;
+    unsigned char type;
+    size_t index = logs.end();
+    while (!batch.full()) {
+        cmd.append(1, logtype.cmd);
+        batch.add(current_term, std::move(cmd));
+        clients.emplace(index++, conn->id());
+        buf.retrieve(crlf + 2);
+        if (buf.readable() <= 2) break;
+        crlf = buf.find_crlf();
+        if (crlf < 0) break;
+        if (!buf.starts_with("<user>")) break;
+        type = *(buf.peek() + 6);
+        if (type == 'r') break;
+        cmd.assign(buf.peek() + 7, crlf - 7);
+        if (cmd.empty()) break;
+    }
+    void(type);
+    info("write batch logs[%zu, %zu]", logs.end(), logs.end() + batch.size() - 1);
+    logs.append(batch);
+    sendLogEntry();
+}
+
+void ServerNode::normalAppendLogEntry(size_t id, std::string&& cmd)
 {
     cmd.append(1, logtype.cmd);
-    logs.append(current_term, cmd);
+    logs.append(current_term, std::move(cmd));
     info("append a new log[%zu](%zu)", logs.end() - 1, current_term);
     clients.emplace(logs.end() - 1, id);
     sendLogEntry();
@@ -175,8 +202,8 @@ void ServerNode::startConfigChange(std::string& config)
     old_new_log.back() = ';';
     old_new_log.append(config);
     old_new_log.append(1, logtype.old_new_config);
-    logs.append(current_term, old_new_log);
-    info("append a Cold,new log[%zu](%zu) <%s>", logs.end() - 1, current_term, old_new_log.c_str());
+    info("append a Cold,new log[%zu](%zu) <%s>", logs.end(), current_term, old_new_log.c_str());
+    logs.append(current_term, std::move(old_new_log));
     config_change_state = OLD_NEW_CONFIG;
     // 同步到使用新旧配置的所有节点上
     applyOldNewConfig();
@@ -216,7 +243,7 @@ void ServerNode::cancelConfigChangeTimer()
 void ServerNode::rollbackConfigChange()
 {
     std::string old_config(1, logtype.old_config);
-    logs.append(current_term, old_config);
+    logs.append(current_term, std::move(old_config));
     sendLogEntry();
     if (!old_config_nodes.count(self_host)) {
         info("I'm not in the old configuration, ready to quit...");
@@ -251,17 +278,17 @@ void ServerNode::rollbackOldConfig()
     info("cluster member change failed, rollback to the old configuration");
 }
 
-void ServerNode::startReadIndex(size_t id, const std::string& cmd)
+void ServerNode::startReadIndex(size_t id, std::string&& cmd)
 {
-    read_map[commit_index].emplace_back(id, cmd);
+    read_map[commit_index].emplace_back(id, std::move(cmd));
     apply_read_index = false;
     sendHeartBeat(hbtype.read_index);
     read_index_heartbeats++;
 }
 
-void ServerNode::startLeaseRead(size_t id, const std::string& cmd)
+void ServerNode::startLeaseRead(size_t id, std::string&& cmd)
 {
-    read_map[commit_index].emplace_back(id, cmd);
+    read_map[commit_index].emplace_back(id, std::move(cmd));
 }
 
 void ServerNode::sendLogEntry()
@@ -299,6 +326,7 @@ void ServerNode::sendLogEntry(ServerEntry *serv)
     conn->format_send("%s,%zu,%s,%zu,%zu,%zu,%zu\r\n", rpcts.ae_rpc, current_term,
             run_id.c_str(), prev_log_index, prev_log_term, commit_index, buffer.size());
     conn->send(buffer);
+    info("send logs[%zu, %zu] to %s", serv->next_index, logs.end() - 1, serv->client->get_peer_addr().to_host());
 }
 
 void ServerNode::processRpcFromServer(const angel::connection_ptr& conn,
@@ -344,6 +372,8 @@ void ServerNode::processrpc(const angel::connection_ptr& conn, rpc& r)
 
 void ServerNode::applyLogEntry()
 {
+    if (last_applied < commit_index)
+        info("logs[%zu, %zu] is applied to the state machine", last_applied, commit_index - 1);
     while (last_applied < commit_index) {
         // 此时[last_applied, commit_index)之间的所有日志条目都可以被应用到状态机
         auto& apply_log = logs[last_applied];
@@ -357,7 +387,6 @@ void ServerNode::applyLogEntry()
                 completeConfigChange();
             }
         }
-        info("log[%zu](%zu) is applied to the state machine", last_applied, apply_log.term);
         if (role == LEADER) { // 回复客户端
             auto it = clients.find(last_applied);
             if (it != clients.end()) {
@@ -380,6 +409,8 @@ void ServerNode::applyReadIndex()
     } else if (rconf.use_lease_read) {
         // 不在租期内
         if (angel::util::get_cur_time_ms() >= lease_expire_time) return;
+    } else {
+        return;
     }
     // 节点还没有数据，正常情况不会出现
     if (commit_index == 0 && logs.empty()) {
@@ -392,9 +423,10 @@ void ServerNode::applyReadIndex()
         return;
     }
     if (commit_index == 0) return;
-    auto& commit_log = logs[commit_index - 1];
+    size_t i = commit_index - 1;
+    size_t term = i < logs.baseIndex() ? last_included_term : logs[i].term;
     // no-op log还没有提交
-    if (commit_log.term != current_term) return;
+    if (term != current_term) return;
     while (!read_map.empty()) {
         auto& [read_index, reqlist] = *read_map.begin();
         if (read_index > last_applied) break;
@@ -548,8 +580,8 @@ void ServerNode::commitConfigLogEntry()
     if (config_change_state == OLD_NEW_CONFIG) {
         // 提交一条Cnew日志
         // (Cold,new中已经携带了相关配置信息)
-        std::string config(1, logtype.new_config);
-        logs.append(current_term, config);
+        std::string new_config(1, logtype.new_config);
+        logs.append(current_term, std::move(new_config));
         config_change_state = NEW_CONFIG;
         info("append a Cnew log[%zu](%zu)", logs.end() - 1, current_term);
         sendLogEntry();
@@ -671,7 +703,7 @@ void ServerNode::becomeNewLeader()
     // 提交一条空操作日志
     // (为了知道哪些日志是已被提交的，以及尝试提交之前还未被提交的日志)
     std::string noop(1, logtype.noop);
-    logs.append(current_term, noop);
+    logs.append(current_term, std::move(noop));
     info("append an empty log[%zu](%zu)", logs.end() - 1, current_term);
     sendLogEntry();
     if (config_change_state) {
@@ -699,40 +731,63 @@ void ServerNode::processRpcAsFollower(const angel::connection_ptr& conn, rpc& r)
     }
 }
 
+// 可以证明，在AE中有多条日志的情况下，如果第一条日志满足一致性检查，那么后面的所有日志也一定会满足
 void ServerNode::recvLogEntry(const angel::connection_ptr& conn, AppendEntry& ae)
 {
+    WriteBatch batch;
     size_t new_log_index = 0;
-    for (const auto& log : ae.logs) {
-        if (ae.prev_log_term > 0) {
-            // 进行一致性检查(如果上一条日志不匹配，就返回false)
-            if (ae.prev_log_index >= logs.end()) {
-                goto fail;
-            }
-            if (ae.prev_log_index < logs.baseIndex() &&
-                    (ae.prev_log_index != last_included_index || ae.prev_log_term != last_included_term)) {
-                goto fail;
-            }
-            if (ae.prev_log_index >= logs.baseIndex() && logs[ae.prev_log_index].term != ae.prev_log_term) {
-                goto fail;
-            }
-            new_log_index = ae.prev_log_index + 1;
+    if (ae.prev_log_term > 0) {
+        // 进行一致性检查(如果上一条日志不匹配，就返回false)
+        if (ae.prev_log_index >= logs.end()) {
+            goto fail;
         }
+        if (ae.prev_log_index < logs.baseIndex() &&
+                (ae.prev_log_index != last_included_index || ae.prev_log_term != last_included_term)) {
+            goto fail;
+        }
+        if (ae.prev_log_index >= logs.baseIndex() && logs[ae.prev_log_index].term != ae.prev_log_term) {
+            goto fail;
+        }
+        new_log_index = ae.prev_log_index + 1;
+    }
+    for (auto& log : ae.logs) {
         // 如果一条已经存在的日志与新的日志冲突（index相同但是term不同），
         // 就删除已经存在的日志和它之后所有的日志
         if (new_log_index < logs.end()) {
             if (logs[new_log_index].term != log.term) {
                 logs.remove(new_log_index);
             } else { // 该条日志已存在
-                goto next;
+                new_log_index++;
+                continue;
             }
         }
         // 追加新日志
-        logs.append(log.term, log.cmd);
-        info("append a new log[%zu](%zu)", logs.end() - 1, log.term);
-        recvConfigLogEntry(log);
-next:
-        if (ae.prev_log_term > 0) ae.prev_log_index++;
-        ae.prev_log_term = log.term;
+        switch (log.cmd.back()) {
+        case logtype.cmd:
+        case logtype.noop:
+            if (batch.full()) {
+                info("write batch logs[%zu, %zu]", logs.end(), logs.end() + batch.size() - 1);
+                logs.append(batch);
+                batch.clear();
+            }
+            batch.add(log.term, std::move(log.cmd));
+            break;
+        case logtype.old_new_config:
+        case logtype.new_config:
+        case logtype.old_config:
+            if (batch.size() > 0) {
+                info("write batch logs[%zu, %zu]", logs.end(), logs.end() + batch.size() - 1);
+                logs.append(batch);
+                batch.clear();
+            }
+            recvConfigLogEntry(log);
+            break;
+        }
+        new_log_index++;
+    }
+    if (batch.size() > 0) {
+        info("write batch logs[%zu, %zu]", logs.end(), logs.end() + batch.size() - 1);
+        logs.append(batch);
     }
     updateCommitIndex(ae);
     sendReply(conn, AE_REPLY, true);
@@ -1084,6 +1139,8 @@ void ServerNode::loadSnapshot()
     read(fd, &last_included_term, sizeof(last_included_term));
     close(fd);
     last_applied = last_included_index + 1;
+    info("snapshot [index: %zu, term: %zu] is applied to the state machine",
+            last_included_index, last_included_term);
     logs.setLastLog(last_included_index, last_included_term);
     service->loadSnapshot(rconf.snapshot, sizeof(size_t) * 2);
 }

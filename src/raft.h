@@ -77,8 +77,9 @@ private:
     void processRpcAsCandidate(const angel::connection_ptr& conn, rpc& r);
     void processRpcAsFollower(const angel::connection_ptr& conn, rpc& r);
 
-    void processUserRequest(const angel::connection_ptr& conn, std::string& cmd, int type);
-    void normalAppendLogEntry(std::string& cmd, size_t id);
+    void processUserRequest(const angel::connection_ptr& conn, angel::buffer& buf, int crlf);
+    void batchAppendLogEntry(const angel::connection_ptr& conn, angel::buffer& buf, int crlf, std::string&& cmd);
+    void normalAppendLogEntry(size_t id, std::string&& cmd);
 
     void startConfigChange(std::string& config);
     void commitConfigLogEntry();
@@ -97,11 +98,11 @@ private:
     void rollbackOldConfig();
     void recvOldConfigLogEntry(const LogEntry& log);
 
-    void startReadIndex(size_t id, const std::string& cmd);
+    void startReadIndex(size_t id, std::string&& cmd);
     void applyReadIndex();
     void applyReadIndex(size_t id, const std::string& cmd);
 
-    void startLeaseRead(size_t id, const std::string& cmd);
+    void startLeaseRead(size_t id, std::string&& cmd);
 
     void sendLogEntry();
     void recvLogEntry(const angel::connection_ptr& conn, AppendEntry& ae);

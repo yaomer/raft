@@ -44,7 +44,7 @@ public:
             set_reply("-unknown command");
         }
     }
-    std::string reply() override
+    std::string& reply() override
     {
         return res;
     }

@@ -5,6 +5,9 @@
 #include <unistd.h>
 #include <sys/mman.h>
 
+#include <angel/logger.h>
+#include <angel/util.h>
+
 using namespace raft;
 
 Logs::~Logs()
@@ -15,7 +18,15 @@ Logs::~Logs()
 void Logs::setLogFile(const std::string& file)
 {
     logfile = file;
+    openLogFile();
+}
+
+void Logs::openLogFile()
+{
     logfd = open(logfile.c_str(), O_RDWR | O_APPEND | O_CREAT, 0644);
+    if (logfd < 0) {
+        log_fatal("can't open %s: %s", logfile.c_str(), angel::util::strerrno());
+    }
 }
 
 void Logs::setLastLog(size_t last_index, size_t last_term)
@@ -31,7 +42,7 @@ size_t Logs::lastTerm()
 }
 
 // [term][cmd-len][cmd]
-void Logs::append(size_t term, const std::string& cmd)
+void Logs::append(size_t term, std::string&& cmd)
 {
     struct iovec iov[3];
     iov[0].iov_base = &term;
@@ -41,9 +52,39 @@ void Logs::append(size_t term, const std::string& cmd)
     iov[1].iov_len = sizeof(len);
     iov[2].iov_base = const_cast<char*>(cmd.data());
     iov[2].iov_len = len;
-    writev(logfd, iov, 3);
+    if (writev(logfd, iov, 3) < 0) {
+        log_fatal("writev(logfd=%d) error: %s", logfd, angel::util::strerrno());
+    }
     fsync(logfd);
-    logs.emplace_back(term, cmd);
+    logs.emplace_back(term, std::move(cmd));
+}
+
+void Logs::append(WriteBatch& batch)
+{
+    if (batch.size() == 0) return;
+    size_t iovlen = batch.size() * 3;
+    assert(iovlen <= IOV_MAX);
+    struct iovec iov[iovlen];
+    size_t lenv[iovlen / 3];
+    int i = 0, j = 0;
+    for (auto& log : batch.wque) {
+        iov[i].iov_base = &log.term;
+        iov[i].iov_len = sizeof(log.term);
+        lenv[j] = log.cmd.size();
+        iov[i + 1].iov_base = &lenv[j];
+        iov[i + 1].iov_len = sizeof(lenv[j]);
+        iov[i + 2].iov_base = const_cast<char*>(log.cmd.data());
+        iov[i + 2].iov_len = lenv[j];
+        i += 3;
+        j++;
+    }
+    if (writev(logfd, iov, iovlen) < 0) {
+        log_fatal("writev(logfd=%d) error: %s", logfd, angel::util::strerrno());
+    }
+    fsync(logfd);
+    for (auto& log : batch.wque) {
+        logs.emplace_back(std::move(log));
+    }
 }
 
 void Logs::remove(size_t from)
@@ -61,13 +102,15 @@ void Logs::remove(size_t from)
     auto tmpfile = getTmpFile();
     int tmpfd = open(tmpfile.c_str(), O_RDWR | O_APPEND | O_CREAT, 0644);
     void *start = mmap(nullptr, remain_bytes, PROT_READ, MAP_SHARED, logfd, 0);
-    write(tmpfd, start, remain_bytes);
+    if (write(tmpfd, start, remain_bytes) < 0) {
+        log_fatal("write error: %s", angel::util::strerrno());
+    }
     fsync(tmpfd);
     close(tmpfd);
     munmap(start, remain_bytes);
     rename(tmpfile.c_str(), logfile.c_str());
     close(logfd);
-    logfd = open(logfile.c_str(), O_RDWR | O_APPEND | O_CREAT, 0644);
+    openLogFile();
 }
 
 void Logs::removeBefore(size_t to)
@@ -84,13 +127,15 @@ void Logs::removeBefore(size_t to)
     auto tmpfile = getTmpFile();
     int tmpfd = open(tmpfile.c_str(), O_RDWR | O_APPEND | O_CREAT, 0644);
     char *start = reinterpret_cast<char*>(mmap(nullptr, filesize, PROT_READ, MAP_SHARED, logfd, 0));
-    write(tmpfd, start + remove_bytes, filesize - remove_bytes);
+    if (write(tmpfd, start + remove_bytes, filesize - remove_bytes) < 0) {
+        log_fatal("write error: %s", angel::util::strerrno());
+    }
     fsync(tmpfd);
     close(tmpfd);
     munmap(start, filesize);
     rename(tmpfile.c_str(), logfile.c_str());
     close(logfd);
-    logfd = open(logfile.c_str(), O_RDWR | O_APPEND | O_CREAT, 0644);
+    openLogFile();
 }
 
 void Logs::load()

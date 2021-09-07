@@ -11,8 +11,8 @@ namespace raft {
 
 struct LogEntry {
     LogEntry() = default;
-    LogEntry(size_t leader_term, const std::string& command)
-        : term(leader_term), cmd(command)
+    LogEntry(size_t leader_term, std::string&& command)
+        : term(leader_term), cmd(std::move(command))
     {
     }
     size_t term; // 创建该条日志的领导人的任期

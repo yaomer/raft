@@ -58,6 +58,8 @@ struct InstallSnapshot {
     size_t last_included_index;
     size_t last_included_term;
     size_t offset;
+    char *chunk_data;
+    size_t chunk_size;
     std::string data;
     bool done;
 };

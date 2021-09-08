@@ -79,7 +79,6 @@ private:
 
     void processUserRequest(const angel::connection_ptr& conn, angel::buffer& buf, int crlf);
     void batchAppendLogEntry(const angel::connection_ptr& conn, angel::buffer& buf, int crlf, std::string&& cmd);
-    void normalAppendLogEntry(size_t id, std::string&& cmd);
 
     void startConfigChange(std::string& config);
     void commitConfigLogEntry();

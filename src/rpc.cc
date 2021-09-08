@@ -146,7 +146,8 @@ void rpc::parse(angel::buffer& buf, int crlf)
         snapshot.offset = stoul(ts);
         ts.assign(p + indexs[4] + 1, p + indexs[5]);
         snapshot.done = stoul(ts);
-        snapshot.data.assign(es + 2, datasize);
+        snapshot.chunk_data = const_cast<char*>(es + 2);
+        snapshot.chunk_size = datasize;
         buf.retrieve(crlf + 2 + datasize);
         msg = snapshot;
         break;

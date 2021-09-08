@@ -71,6 +71,9 @@ void readConf(const std::string& confile)
     if (rconf.self.host.empty()) {
         log_fatal("You must have the <self> option");
     }
+    if (!rconf.use_read_index && !rconf.use_lease_read) {
+        log_fatal("You have to choose between ReadIndex and LeaseRead");
+    }
 }
 
 }

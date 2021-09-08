@@ -138,8 +138,6 @@ void ServerNode::processUserRequest(const angel::connection_ptr& conn, angel::bu
             startReadIndex(conn->id(), std::move(cmd));
         } else if (rconf.use_lease_read) {
             startLeaseRead(conn->id(), std::move(cmd));
-        } else {
-            normalAppendLogEntry(conn->id(),  std::move(cmd));
         }
         buf.retrieve(crlf + 2);
     } else {
@@ -151,7 +149,6 @@ void ServerNode::batchAppendLogEntry(const angel::connection_ptr& conn, angel::b
                                      int crlf, std::string&& cmd)
 {
     WriteBatch batch;
-    unsigned char type;
     size_t index = logs.end();
     while (!batch.full()) {
         cmd.append(1, logtype.cmd);
@@ -162,23 +159,13 @@ void ServerNode::batchAppendLogEntry(const angel::connection_ptr& conn, angel::b
         crlf = buf.find_crlf();
         if (crlf < 0) break;
         if (!buf.starts_with("<user>")) break;
-        type = *(buf.peek() + 6);
+        unsigned char type = *(buf.peek() + 6);
         if (type == 'r') break;
         cmd.assign(buf.peek() + 7, crlf - 7);
         if (cmd.empty()) break;
     }
-    void(type);
     info("write batch logs[%zu, %zu]", logs.end(), logs.end() + batch.size() - 1);
     logs.append(batch);
-    sendLogEntry();
-}
-
-void ServerNode::normalAppendLogEntry(size_t id, std::string&& cmd)
-{
-    cmd.append(1, logtype.cmd);
-    logs.append(current_term, std::move(cmd));
-    info("append a new log[%zu](%zu)", logs.end() - 1, current_term);
-    clients.emplace(logs.end() - 1, id);
     sendLogEntry();
 }
 
@@ -403,14 +390,13 @@ void ServerNode::applyLogEntry()
 
 void ServerNode::applyReadIndex()
 {
+    if (read_map.empty()) return;
     if (rconf.use_read_index) {
         // 未收到大多数节点的心跳响应
         if (!apply_read_index) return;
     } else if (rconf.use_lease_read) {
         // 不在租期内
         if (angel::util::get_cur_time_ms() >= lease_expire_time) return;
-    } else {
-        return;
     }
     // 节点还没有数据，正常情况不会出现
     if (commit_index == 0 && logs.empty()) {
@@ -1046,9 +1032,9 @@ void ServerNode::recvSnapshot(const angel::connection_ptr& conn, InstallSnapshot
         snapshot_state = RECV_SNAPSHOT;
     }
     info("recvd snapshot [index: %zu, term: %zu](off=%zu, size=%zu, done=%d)", snapshot.last_included_index,
-            snapshot.last_included_term, snapshot.offset, snapshot.data.size(), snapshot.done);
+            snapshot.last_included_term, snapshot.offset, snapshot.chunk_size, snapshot.done);
     lseek(snapshot_fd, snapshot.offset, SEEK_SET);
-    write(snapshot_fd, snapshot.data.data(), snapshot.data.size());
+    write(snapshot_fd, snapshot.chunk_data, snapshot.chunk_size);
     updateLastRecvHeartbeatTime();
     if (!snapshot.done) {
         sendReply(conn, IS_REPLY, true);

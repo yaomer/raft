@@ -70,7 +70,7 @@ public:
             }
             fsync(fd);
             close(fd);
-            exit(0);
+            abort();
         }
     }
     bool isSavedSnapshot() override

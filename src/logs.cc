@@ -8,7 +8,7 @@
 #include <angel/logger.h>
 #include <angel/util.h>
 
-using namespace raft;
+namespace raft {
 
 Logs::~Logs()
 {
@@ -155,4 +155,6 @@ void Logs::load()
         logs.emplace_back(term, std::move(cmd));
     }
     munmap(start, filesize);
+}
+
 }

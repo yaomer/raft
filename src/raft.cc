@@ -14,7 +14,7 @@
 #include <sys/stat.h>
 #include <stdarg.h>
 
-using namespace raft;
+namespace raft {
 
 struct LogType {
     // 普通用户命令日志
@@ -1182,4 +1182,6 @@ void ServerNode::info(const char *fmt, ...)
 	vsnprintf(buf, sizeof(buf), fmt, ap);
     fprintf(stdout, "%s%s\n", rolestr, buf);
 	va_end(ap);
+}
+
 }

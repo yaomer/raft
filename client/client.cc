@@ -34,14 +34,18 @@ bool is_leader_collapse = true;
 
 class client {
 public:
-    client() : cli(t_loop.wait_loop(), angel::inet_addr(rand_select_server()), false, 300)
+    client()
     {
-        cli.set_connection_handler([](const angel::connection_ptr& conn){
+        angel::client_options ops;
+        ops.retry_interval_ms = 300;
+        ops.is_quit_loop = false;
+        cli.reset(new angel::client(t_loop.wait_loop(), angel::inet_addr(rand_select_server()), ops));
+        cli->set_connection_handler([](const angel::connection_ptr& conn){
                 std::cout << "### connect with server " << conn->get_peer_addr().to_host() << " \n";
                 is_leader_collapse = true;
                 try_server_set.clear();
                 });
-        cli.set_message_handler([this](const angel::connection_ptr& conn, angel::buffer& buf){
+        cli->set_message_handler([this](const angel::connection_ptr& conn, angel::buffer& buf){
                 if (buf.starts_with("<host>")) {
                     std::string host(buf.peek() + 6, buf.peek() + buf.find_crlf());
                     if (host != "") {
@@ -56,37 +60,36 @@ public:
                 std::cout << "(reply) " << buf.c_str();
                 buf.retrieve_all();
                 });
-        cli.set_close_handler([this](const angel::connection_ptr& conn){
+        cli->set_close_handler([this](const angel::connection_ptr& conn){
                 if (!is_leader_collapse) return;
                 auto host = rand_select_server();
                 std::cout << "### disconnect with server " << conn->get_peer_addr().to_host()
                           << ", try to connect " << host << "\n";
                 this->reconnect(host);
                 });
-        cli.not_exit_loop();
     }
     void start()
     {
-        cli.start();
+        cli->start();
         set_connect_timeout_timer();
     }
     bool is_connected()
     {
-        return cli.is_connected();
+        return cli->is_connected();
     }
     const angel::connection_ptr& conn()
     {
-        return cli.conn();
+        return cli->conn();
     }
 private:
     void connect_timeout_handler()
     {
-        if (!cli.is_connected()) {
+        if (!cli->is_connected()) {
             auto host = rand_select_server();
-            std::cout << "### connect " << cli.get_peer_addr().to_host()
+            std::cout << "### connect " << cli->get_peer_addr().to_host()
                       << " timeout, try to connect " << host << "\n";
             is_leader_collapse = false;
-            cli.restart(angel::inet_addr(host));
+            cli->restart(angel::inet_addr(host));
             set_connect_timeout_timer();
         }
     }
@@ -94,7 +97,7 @@ private:
     void reconnect(const std::string& host)
     {
         is_leader_collapse = false;
-        cli.restart(angel::inet_addr(host));
+        cli->restart(angel::inet_addr(host));
         set_connect_timeout_timer();
     }
 
@@ -104,7 +107,7 @@ private:
     }
 
     angel::evloop_thread t_loop;
-    angel::client cli;
+    std::unique_ptr<angel::client> cli;
 };
 
 int main(int argc, char *argv[])

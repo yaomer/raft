@@ -10,6 +10,7 @@
 
 #include <angel/server.h>
 #include <angel/client.h>
+#include <angel/util.h>
 
 #include "rpc.h"
 #include "logs.h"
@@ -28,8 +29,12 @@ class ServerNode;
 
 struct ServerEntry {
     ServerEntry(angel::evloop *loop, angel::inet_addr conn_addr)
-        : client(new angel::client(loop, conn_addr, true, 1000))
     {
+        angel::client_options ops;
+        ops.is_reconnect = true;
+        ops.retry_interval_ms = 1000;
+        ops.is_quit_loop = false;
+        client.reset(new angel::client(loop, conn_addr, ops));
     }
     void start(ServerNode *self);
     std::unique_ptr<angel::client> client; // 到该服务器的连接

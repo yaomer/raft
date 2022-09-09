@@ -1163,7 +1163,6 @@ void ServerEntry::start(ServerNode *self)
     client->set_close_handler([self](const angel::connection_ptr& conn){
             self->info("### disconnect with server %s", conn->get_peer_addr().to_host());
             });
-    client->not_exit_loop();
     client->start();
 }
 

@@ -11,6 +11,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#include <sys/uio.h>
 
 // 一个简单的K-V服务
 // 1) set key value

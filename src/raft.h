@@ -33,7 +33,6 @@ struct ServerEntry {
         angel::client_options ops;
         ops.is_reconnect = true;
         ops.retry_interval_ms = 1000;
-        ops.is_quit_loop = false;
         client.reset(new angel::client(loop, conn_addr, ops));
     }
     void start(ServerNode *self);

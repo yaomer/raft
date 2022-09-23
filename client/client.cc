@@ -38,7 +38,6 @@ public:
     {
         angel::client_options ops;
         ops.retry_interval_ms = 300;
-        ops.is_quit_loop = false;
         cli.reset(new angel::client(t_loop.wait_loop(), angel::inet_addr(rand_select_server()), ops));
         cli->set_connection_handler([](const angel::connection_ptr& conn){
                 std::cout << "### connect with server " << conn->get_peer_addr().to_host() << " \n";

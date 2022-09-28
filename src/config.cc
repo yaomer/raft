@@ -5,45 +5,16 @@
 #include <iostream>
 
 #include <angel/logger.h>
+#include <angel/util.h>
 
 namespace raft {
 
 struct rconf rconf;
 
-typedef std::vector<std::string> Param;
-typedef std::vector<Param> Paramlist;
-
-static Paramlist parseConf(const char *confile)
-{
-    char buf[1024];
-    FILE *fp = fopen(confile, "r");
-    if (!fp) {
-        log_fatal("can't open %s", confile);
-    }
-    Paramlist paramlist;
-    while (fgets(buf, sizeof(buf), fp)) {
-        const char *s = buf;
-        const char *es = buf + strlen(buf);
-        Param param;
-        do {
-            s = std::find_if_not(s, es, isspace);
-            if (s == es || s[0] == '#') break;
-            const char *p = std::find_if(s, es, isspace);
-            assert(p != es);
-            param.emplace_back(s, p);
-            s = p + 1;
-        } while (true);
-        if (!param.empty())
-            paramlist.emplace_back(param);
-    }
-    fclose(fp);
-    return paramlist;
-}
-
 void readConf(const std::string& confile)
 {
     rconf.confile = confile;
-    auto paramlist = parseConf(confile.c_str());
+    auto paramlist = angel::util::parse_conf(confile.c_str());
     for (auto& param : paramlist) {
         if (param[0].compare("self") == 0) {
             rconf.self.host = param[1] + ":" + param[2];
